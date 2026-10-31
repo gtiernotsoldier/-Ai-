@@ -20,6 +20,7 @@
 | M4 宏引擎+minitouch | ✅ 完成 | injection(Minitouch/Mock) + macro(Tap/Swipe/Joystick 20Hz/贝塞尔) + executor(可中断宏协议+拟人化) |
 | M4.5 决策接口+主循环 | ✅ 完成 | policy(Action空间/Rule/Onnx/看门狗) + orchestrator(20Hz 闭环: 捕获→感知→状态→决策→执行, 沙箱自走) |
 | 打磨 P0/P1/P2 | ✅ 完成 | P0-3 三键(atk/secret/dash) + P1 死维度回填(24→36)与张冠李戴修复 + P2 敌踪记忆/CD量纲; 见《打磨清单》 |
+| M4.6 帧数据表+Sequencer | ✅ 完成 | ⑥帧数据表+动作时序状态机 ⑦bait→sub_flash→punish 事件分支 ⑩20Hz策略/60Hz帧级分层(165 tests) |
 | M5 录像+BC | ⬜ | CSPL 阶段① |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
@@ -74,10 +75,11 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 127 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+`pytest -q`: 165 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
 M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾;
 **走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流;
-**打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环, 见下表）。
+**打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环;
+**M4.6 Sequencer**: 连段一次下发不被逐tick重建/取消窗口替换/ bait→替身闪→punish 端到端, 见下表）。
 
 ### 打磨清单 P 级完成记录
 
@@ -92,10 +94,22 @@ closing_speed/approach/threat 语义修复、resources 敌我双侧、meta r6-r9
 | P2#5 | resources.ult_cd_self(秒/60) 与 skill_cds.ult(按总CD) 量纲分离 | ✅ |
 | ① | 事件计时器生产路径注册(enemy_sub/self_sub/enemy_ult)+特效起表+敌方替身就绪接回状态 | ✅ |
 | ⑤ | buttons 切片 6 维由上一帧实际下发动作回填（Orchestrator._buttons_feedback） | ✅ |
-| 未做 | 检测器扩类(projectile/wall, 施工⑧)、帧数据表+Sequencer(⑥⑦⑩)、trade scorer/bait(⑨) | ⬜ 等指令 |
+| 未做 | 检测器扩类(projectile/wall, 施工⑧)、trade scorer(⑨) | ⬜ 等指令 |
 
-【占位值提醒】`CD_TOTAL_S` / `EVENT_CD_S` / `CHARGE_HOLD_MS` 与 btn_atk/btn_secret/btn_dash
-坐标均为占位, 需真机实测标定后覆盖（标定前勿作训练标签依据）。
+### M4.6 帧数据表 + Sequencer（施工⑥⑦⑩）
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| ⑥帧数据表 | `config/frame_data.json`(startup/active/recovery/cancel_from/cancel_into + 连段表) + `core/frame_data.py`(加载/校验/取消衔接 gap 推算) | ✅ |
+| ⑥动作时序状态机 | `core/action_state.py` ActionTracker: 回答「现在是这招第几帧、取消窗口开了没」 | ✅ |
+| ⑩架构分层 | `core/sequencer.py`: 20Hz 策略出意图 → Sequencer 按帧表一次编译一次下发;
+取消窗口内替换=取消后摇, 窗口未开拒绝(20Hz 刷屏拆不散连段); 走位仍由摇杆持久流承载 | ✅ |
+| ⑦卡替身 | bait 序列声明分支(事件,替代连段); 感知事件边沿 events_fired → Orchestrator
+直接转 Sequencer.on_events → 帧级切 punish(不经 20Hz 回合); 端到端测试验证 | ✅ |
+| 策略层接口 | 策略可选实现 bind_sequencer()(意图式), 未实现则按钮意图照旧单步下发(完全兼容) | ✅ |
+
+【占位值提醒】`CD_TOTAL_S` / `EVENT_CD_S` / `CHARGE_HOLD_MS` / `frame_data.json` 全部帧数
+与 btn_atk/btn_secret/btn_dash 坐标均为占位, 需真机实测标定后覆盖（标定前勿作训练标签依据）。
 
 ### 走位下发机制（摇杆持久流）
 

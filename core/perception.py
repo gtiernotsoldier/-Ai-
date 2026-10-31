@@ -130,6 +130,8 @@ class PerceptionResult:
     cds: dict = field(default_factory=dict)
     # 事件计时器
     event_remaining: dict = field(default_factory=dict)
+    # 事件边沿(打磨清单⑦): 本帧新触发的事件名 —— Sequencer 帧级分支的触发源
+    events_fired: tuple[str, ...] = ()
 
 
 # ═════════════════════════ 感知主类 ═════════════════════════
@@ -208,10 +210,15 @@ class Perception:
             closing = 0.0
 
         # 特效 → 事件起表（打磨清单①: 计时器已在 __init__ 注册, 不再是 no-op）
+        # 同时记录边沿(fired only on rising edge of this frame) → 主循环转交
+        # Sequencer.on_events() 做帧级分支, 免去策略层 20Hz 轮询（打磨清单⑦）
+        fired: list[str] = []
         if any(d.cls == "effect_sub" for d in dets):
             self.trigger_event("enemy_sub")
+            fired.append("enemy_sub")
         if any(d.cls == "effect_ult" for d in dets):
             self.trigger_event("enemy_ult")
+            fired.append("enemy_ult")
 
         # 慢变量: 5帧一读（60Hz→12Hz）
         if frame.frame_id % self.slow_every == 0:
@@ -248,5 +255,6 @@ class Perception:
             sub_ready_enemy=sub_ready_enemy,
             cds=dict(self._slow_cache.get("cds", {})),
             event_remaining=event_remaining,
+            events_fired=tuple(fired),
         )
         return res

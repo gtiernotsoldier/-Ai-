@@ -35,6 +35,7 @@ from core.macro import JoystickStream, MonotonicClock, VirtualClock
 from core.perception import Perception
 from core.policy import Action, PolicyProvider
 from core.screen_capture import FrameSource, SyntheticSource
+from core.sequencer import Sequencer, Sequence, Step
 from core.state import StateBuilder
 from core.synthetic import Scene
 
@@ -60,6 +61,8 @@ class LoopReport:
     issue_ms: list = field(default_factory=list)
     loop_ms: list = field(default_factory=list)     # 帧就绪(frame.ts) → 下发完成
     full_ms: list = field(default_factory=list)     # 捕获起点 → 下发完成
+    # M4.6 Sequencer 健康度: submitted/rejected_busy/cancel_swap/branch_taken
+    seq_stats: dict = field(default_factory=dict)
 
     def _p(self, xs: list, q: float) -> float:
         return float(np.percentile(xs, q)) if xs else 0.0
@@ -81,6 +84,9 @@ class LoopReport:
                  f"摇杆持久流: 按下{self.stick_starts}次  触点事件{self.stick_events}个"
                  f"（其中提前转向{self.stick_steers}个）  "
                  f"{'PASS' if self.stick_starts <= 1 else 'FAIL(反复重建)'}",
+                 *( ["序列器: " + ", ".join(f"{k}={v}" for k, v in
+                                           sorted(self.seq_stats.items()))]
+                    if self.seq_stats else [] ),
                  f"{'环节':<22}{'预算':>7}{'p50':>9}{'p95':>9}{'max':>9}  判定"]
         ok_all = True
         for name, xs, budget in rows:
@@ -103,13 +109,15 @@ class Orchestrator:
     def __init__(self, source: FrameSource, perception: Perception,
                  builder: StateBuilder, policy: PolicyProvider,
                  executor: Executor,
-                 clock: MonotonicClock | VirtualClock | None = None):
+                 clock: MonotonicClock | VirtualClock | None = None,
+                 sequencer: Sequencer | None = None):
         self.source = source
         self.perception = perception
         self.builder = builder
         self.policy = policy
         self.executor = executor
         self.clock = clock if clock is not None else MonotonicClock()
+        self.sequencer = sequencer
         self._stop = threading.Event()
         # 走位: 长生命周期摇杆持久流（按下一次, 之后在线转向, 绝不因转向而释放）
         self._stream: JoystickStream | None = None
@@ -117,6 +125,10 @@ class Orchestrator:
         self._btn_handle: MacroHandle | None = None
         self._btn_name: str | None = None
         self._stick_starts: int = 0        # 摇杆被(重新)按下次数, 写入 LoopReport
+        # M4.6: 策略层若声明 bind_sequencer(意图式策略), 把执行层交给它 ——
+        # 策略可 submit 连段/bait 序列, 而不只单帧按钮（清单第五节分层）
+        if sequencer is not None and hasattr(policy, "bind_sequencer"):
+            policy.bind_sequencer(sequencer)
 
     # ── 按钮反馈（打磨清单⑤: state.buttons 切片的真值来源）──
     def _buttons_feedback(self, action: Action | None) -> dict | None:
@@ -162,21 +174,30 @@ class Orchestrator:
         elif self._stream is not None and self._stream.alive:
             self._stream.set_direction(0.0, 0.0)   # 回中: 停走但手指仍握杆
 
-        # ── 按钮: 一次性宏, 独立触点 ──
+        # ── 按钮: 按钮意图两路 ──
         if action.button is not None:
-            in_flight = (self._btn_handle is not None
-                         and not self._btn_handle.done)
-            if not (in_flight and self._btn_name == action.button):
-                if in_flight:                 # 换按钮 → 打断旧的（取消语义）
-                    self._btn_handle.interrupt()
-                    self._btn_handle.join(timeout=0.05)
-                self._btn_handle = self.executor.play_async(
-                    self.executor.tap_macro(action.button,
-                                            hold_ms=action.hold_ms))
-                # 自己按了替身 → 自侧替身计时器起表（打磨清单①: 知道自己按过什么）
-                if action.button == "sub":
+            if self.sequencer is not None:
+                # M4.6 分层: 按钮意图交给 Sequencer —— 空闲即发, 取消窗口内
+                # 替换(取消后摇), 窗口未开则忽略(不逐 tick 重建/拆散连段)
+                ok = self.sequencer.submit(
+                    Sequence("tick", (Step(action.button,
+                                           hold_ms=action.hold_ms),)))
+                if ok and action.button == "sub":
                     self.perception.trigger_event("self_sub")
-            self._btn_name = action.button
+            else:
+                in_flight = (self._btn_handle is not None
+                             and not self._btn_handle.done)
+                if not (in_flight and self._btn_name == action.button):
+                    if in_flight:                 # 换按钮 → 打断旧的（取消语义）
+                        self._btn_handle.interrupt()
+                        self._btn_handle.join(timeout=0.05)
+                    self._btn_handle = self.executor.play_async(
+                        self.executor.tap_macro(action.button,
+                                                hold_ms=action.hold_ms))
+                    # 自己按了替身 → 自侧替身计时器起表（打磨清单①: 知道自己按过什么）
+                    if action.button == "sub":
+                        self.perception.trigger_event("self_sub")
+                self._btn_name = action.button
         return (time.perf_counter() - t0) * 1000.0
 
     def stop(self) -> None:
@@ -208,6 +229,10 @@ class Orchestrator:
                     t0 = time.perf_counter()
                     res = self.perception.update(frame)
                     rpt.perceive_ms.append((time.perf_counter() - t0) * 1000)
+                    # M4.6: 事件边沿 → 帧级分支(⑦ 卡替身): 在决策回合之外直接
+                    # 切 punish —— 从看到替身闪到 punish 首步不经 20Hz 等待
+                    if self.sequencer is not None and res.events_fired:
+                        self.sequencer.on_events(res.events_fired)
                     t0 = time.perf_counter()
                     state = self.builder.build(res, frame.frame_id, frame.ts,
                                                buttons=self._buttons_feedback(last_action))
@@ -250,6 +275,9 @@ class Orchestrator:
                 rpt.stick_events = self._stream.n_events
                 rpt.stick_steers = self._stream.n_steers
             rpt.stick_starts = self._stick_starts
+            if self.sequencer is not None:
+                self.sequencer.shutdown()            # 打断在飞序列(只释放自己的触点)
+                rpt.seq_stats = dict(self.sequencer.stats)
             if self._btn_handle is not None:
                 self._btn_handle.interrupt()
                 self._btn_handle.join(timeout=1.0)
@@ -262,10 +290,11 @@ class Orchestrator:
 # ═════════════════════════ 沙箱自走演示 ═════════════════════════
 def main(duration_s: float = 3.0) -> int:
     print("=" * 78)
-    print("Shinobi_God 闭环演示 (M1-M4.5 全链路: 捕获→感知→状态→决策→执行)")
+    print("Shinobi_God 闭环演示 (M1-M4.6 全链路: 捕获→感知→状态→决策→Sequencer→执行)")
     print("=" * 78)
     src = SyntheticSource(fps=60, scene=Scene())
     from core.detectors import MockFastDetector
+    from core.frame_data import FrameData
     from core.perception import CVReader
     perc = Perception(MockFastDetector(), CVReader(Keymap.load()), slow_every=5)
     builder = StateBuilder()
@@ -273,7 +302,8 @@ def main(duration_s: float = 3.0) -> int:
     policy = RulePolicy()
     inj = MockInjector(clock=time.monotonic)
     executor = Executor(inj, Keymap.load(), humanize=True)
-    orch = Orchestrator(src, perc, builder, policy, executor)
+    seqr = Sequencer(executor, FrameData.load())
+    orch = Orchestrator(src, perc, builder, policy, executor, sequencer=seqr)
 
     rpt = orch.run(duration_s=duration_s)
     print()

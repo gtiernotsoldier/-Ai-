@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "fps": 60,
+    "note": "⚠️ 全部帧数为占位标定值, 需从实战录像逐招实测后覆盖(标定前不要拿它做训练标签依据)。帧号以该招按下瞬间=0 计: startup=前摇, active=判定生效, recovery=后摇。cancel_from=取消窗口起点帧(此后至 total 帧可被 cancel_into 中的招取消, 即『取消后摇』); cancel_into=可取消后接入的招式列表。",
+    "touch": "打磨清单⑥: 帧数据表是博弈层地基 —— 取消后摇/连段衔接/卡替身 punish 都依赖它。"
+  },
+  "actions": {
+    "atk":    {"startup": 4,  "active": 3,  "recovery": 9,  "cancel_from": 10, "cancel_into": ["atk", "skill1", "skill2", "skill3", "dash", "secret"]},
+    "skill1": {"startup": 8,  "active": 6,  "recovery": 16, "cancel_from": 18, "cancel_into": ["atk", "skill2", "dash", "secret"]},
+    "skill2": {"startup": 10, "active": 8,  "recovery": 22, "cancel_from": 24, "cancel_into": ["atk", "dash"]},
+    "skill3": {"startup": 12, "active": 10, "recovery": 28, "cancel_from": 30, "cancel_into": []},
+    "ult":    {"startup": 15, "active": 20, "recovery": 35, "cancel_from": 60, "cancel_into": []},
+    "secret": {"startup": 2,  "active": 2,  "recovery": 6,  "cancel_from": 6,  "cancel_into": ["atk", "skill1", "skill2", "skill3", "dash"]},
+    "dash":   {"startup": 2,  "active": 10, "recovery": 8,  "cancel_from": 14, "cancel_into": ["atk"]},
+    "sub":    {"startup": 3,  "active": 2,  "recovery": 5,  "cancel_from": 8,  "cancel_into": []}
+  },
+  "combos": {
+    "basic_press": {"steps": ["atk", "atk", "atk"], "note": "⑥ 验证连段: 后一击在前一击取消窗口起点接入"},
+    "bait_atk":    {"steps": ["atk", "atk"],        "note": "⑦ 阶段A: 低成本起手做 bait, 逼对面交替身"},
+    "punish_sub":  {"steps": ["skill2", "atk", "atk", "skill3"], "note": "⑦ 阶段B: 敌方替身闪后硬直窗口的高伤 punish, 事件分支切入"}
+  }
+}
