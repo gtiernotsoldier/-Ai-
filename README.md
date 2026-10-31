@@ -19,6 +19,7 @@
 | M3 感知层 60Hz | ✅ 完成 | 快变量(可插拔YOLO/Mock) + 慢变量(纯OpenCV血条/能量/CD) + 事件计时器 → 64维状态向量 |
 | M4 宏引擎+minitouch | ✅ 完成 | injection(Minitouch/Mock) + macro(Tap/Swipe/Joystick 20Hz/贝塞尔) + executor(可中断宏协议+拟人化) |
 | M4.5 决策接口+主循环 | ✅ 完成 | policy(Action空间/Rule/Onnx/看门狗) + orchestrator(20Hz 闭环: 捕获→感知→状态→决策→执行, 沙箱自走) |
+| 打磨 P0/P1/P2 | ✅ 完成 | P0-3 三键(atk/secret/dash) + P1 死维度回填(24→36)与张冠李戴修复 + P2 敌踪记忆/CD量纲; 见《打磨清单》 |
 | M5 录像+BC | ⬜ | CSPL 阶段① |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
@@ -58,14 +59,14 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 
 | 环节 | 预算 | p50 | p95 | max | 判定 |
 |---|---|---|---|---|---|
-| 画面捕获 | 10ms | 6.70 | 7.09 | 7.82 | PASS |
-| 感知推理 | 15ms | 0.03 | 0.26 | 0.33 | PASS |
-| 状态组装 | 1ms | 0.16 | 0.19 | 0.21 | PASS |
-| 决策(看门狗20ms) | 15ms | 0.01 | 0.01 | 0.02 | PASS |
-| 动作下发 | 1ms | 0.00 | 0.33 | 0.34 | PASS |
-| 闭环合计(捕获起) | 42ms | 6.99 | 7.41 | 8.06 | PASS |
+| 画面捕获 | 10ms | 6.75 | 7.22 | 7.66 | PASS |
+| 感知推理 | 15ms | 0.04 | 0.36 | 0.43 | PASS |
+| 状态组装 | 1ms | 0.23 | 0.26 | 0.29 | PASS |
+| 决策(看门狗20ms) | 15ms | 0.01 | 0.02 | 0.02 | PASS |
+| 动作下发 | 1ms | 0.02 | 0.03 | 0.23 | PASS |
+| 闭环合计(捕获起) | 42ms | 7.10 | 7.68 | 8.03 | PASS |
 
-实测节拍 19.96Hz, 看门狗 0 触发, 残留触点 0 —— 闭环 p95 占红线 7.4%/目标 18.5%
+实测节拍 19.96Hz, 看门狗 0 触发, 残留触点 0 —— 闭环 p95 占红线 7.7%/目标 19.2%
 (不含模拟器渲染 16ms + 响应 16ms 物理税)。决策层换 OnnxPolicy 时同表重跑。
 
 `python -m core.smoothness_test`:
@@ -73,9 +74,28 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 107 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+`pytest -q`: 127 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
 M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾;
-**走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流）。
+**走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流;
+**打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环, 见下表）。
+
+### 打磨清单 P 级完成记录
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| P0-1/P0-2/P0-5 | 走位断流/拟人分层/触点分路（见上节历史坑） | ✅ 前次已修 |
+| P0-3 | atk/secret/dash 三键: ACTION_BUTTONS 扩至 9-16 + keymap 三区域（占位需真机标定） | ✅ |
+| P0-4 | hold_ms/strength/CHARGE_HOLD_MS（前次已完成, 本次核验） | ✅ |
+| P1 | enemy_kin.sub_ready 张冠李戴修复; 死维度回填 24→36/64（buttons 切片动作反馈、
+closing_speed/approach/threat 语义修复、resources 敌我双侧、meta r6-r9 计时器+置信度） | ✅ |
+| P2#4 | 敌人失踪保留最后已知位置 + exp(-age/τ) 置信度衰减 | ✅ |
+| P2#5 | resources.ult_cd_self(秒/60) 与 skill_cds.ult(按总CD) 量纲分离 | ✅ |
+| ① | 事件计时器生产路径注册(enemy_sub/self_sub/enemy_ult)+特效起表+敌方替身就绪接回状态 | ✅ |
+| ⑤ | buttons 切片 6 维由上一帧实际下发动作回填（Orchestrator._buttons_feedback） | ✅ |
+| 未做 | 检测器扩类(projectile/wall, 施工⑧)、帧数据表+Sequencer(⑥⑦⑩)、trade scorer/bait(⑨) | ⬜ 等指令 |
+
+【占位值提醒】`CD_TOTAL_S` / `EVENT_CD_S` / `CHARGE_HOLD_MS` 与 btn_atk/btn_secret/btn_dash
+坐标均为占位, 需真机实测标定后覆盖（标定前勿作训练标签依据）。
 
 ### 走位下发机制（摇杆持久流）
 
@@ -102,7 +122,7 @@ M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧
 core/          constants(宪法) | screen_capture(M1) | keymap+perception(M2/M3)
                state(64维) | detectors(可插拔) | injection+macro+executor(M4)
                policy+orchestrator(M4.5) | latency_test | smoothness_test
-config/        keymap.json（标定产物）
+config/        keymap.json（标定产物, 含 atk/secret/dash 占位区域）
 tools/         calibrate_keymap.py | synthetic.py
 tests/         pytest 单测
 ```

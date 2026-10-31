@@ -30,8 +30,30 @@ GAP_TOLERANCE_X = 1.5         # 摇杆流相邻事件间隔容忍倍数 (50ms*1.
 # ───────────────────────── M4.5 决策接口 + 主循环 ─────────────────────────
 # 闭环本地可测子集预算: 捕获+感知+组装+决策+下发（模拟器渲染/响应两段物理税除外）
 LOOP_BUDGET_MS = 42.0
-# 离散动作表（OnnxPolicy argmax → 动作）: 0-8 摇杆8向+静止, 9-13 按钮
-ACTION_BUTTONS: tuple[str, ...] = ("skill1", "skill2", "skill3", "ult", "sub")
+# 离散动作表（OnnxPolicy argmax → 动作）: 0-8 摇杆8向+静止, 9-16 按钮
+# P0-3: atk(普攻)/secret(秘卷)/dash(闪避) —— 此前三键不存在, 无法执行
+ACTION_BUTTONS: tuple[str, ...] = ("skill1", "skill2", "skill3", "ult", "sub",
+                                   "atk", "secret", "dash")
+
+# ───────────── 技能总 CD 表（秒）【占位值, 需按角色实测标定后覆盖】 ─────────────
+# 用途: CVReader 扇形占比(剩余/总CD) × 总CD = 剩余秒数 —— 资源置换判断需要时间量纲
+CD_TOTAL_S: dict[str, float] = {
+    "skill1": 12.0, "skill2": 16.0, "skill3": 20.0,
+    "ult": 45.0, "sub": 40.0, "secret": 30.0,
+}
+
+# 事件计时器时长（秒）【占位值, 需按角色实测标定】—— 打磨清单①:
+# 敌方替身/大招 HUD 不可见, 只能靠特效帧起表推算
+EVENT_CD_S: dict[str, float] = {
+    "enemy_sub": 40.0, "self_sub": 40.0, "enemy_ult": 45.0,
+}
+
+# 敌人失踪后位置置信度衰减时间常数（秒）—— P2#4:
+# 敌人不可见时保留最后已知位置, 置信度 exp(-age/τ) 随时间衰减
+ENEMY_POS_TAU_S = 1.0
+
+# 威胁判定距离（px）: 敌方大招就绪且 dist<THREAT_RANGE_PX → relative.threat=1
+THREAT_RANGE_PX = 400.0
 
 # ───────────────────────── 触点语义分配 ─────────────────────────
 # 摇杆与按钮必须分路: 抢同一路触点会互相顶掉（边走边放技能时按钮把杆松开）。

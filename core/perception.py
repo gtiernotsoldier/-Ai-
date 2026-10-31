@@ -18,6 +18,7 @@ from typing import Callable
 
 import numpy as np
 
+from core.constants import ENEMY_POS_TAU_S, EVENT_CD_S
 from core.detectors import Detection, FastDetector
 from core.keymap import Keymap
 from core.screen_capture import Frame
@@ -117,11 +118,15 @@ class PerceptionResult:
     self_vel: tuple[float, float] = (0.0, 0.0)
     enemy_vel: tuple[float, float] = (0.0, 0.0)
     enemy_visible: bool = False
+    enemy_pos_confidence: float = 0.0     # P2#4: 失踪后 exp(-age/τ) 衰减
+    closing_speed: float = 0.0            # px/s, >0 = 双方接近中
     # 慢变量（缓存, 12Hz 刷新）
     hp_self: float = 0.0
     hp_enemy: float = 0.0
     energy_self: float = 0.0
+    energy_enemy: float = 0.0             # HUD 不可见, 恒 0（公式先就位, 检测器扩类后有数即用）
     sub_ready_self: bool = False
+    sub_ready_enemy: bool = True          # 打磨清单①: 敌方替身就绪(事件计时器推算)
     cds: dict = field(default_factory=dict)
     # 事件计时器
     event_remaining: dict = field(default_factory=dict)
@@ -145,6 +150,14 @@ class Perception:
         self._prev_ts: float | None = None
         self._slow_cache: dict = {}
         self._events: dict[str, EventTimer] = {}
+        # 打磨清单①: 生产路径注册事件计时器（此前 register_event 从未被调用,
+        # trigger_event 静默 no-op, event_remaining 永远空 dict）。
+        # 敌方替身/大招 HUD 不可见 → 只能靠特效帧起表推算。
+        for name, dur in EVENT_CD_S.items():
+            self.register_event(name, dur)
+        # P2#4: 敌人失踪时保留最后已知位置 + 置信度随时间衰减
+        self._last_enemy_pos: tuple[float, float] | None = None
+        self._last_enemy_seen_ts: float | None = None
 
     # ── 事件计时器管理 ──
     def register_event(self, name: str, duration_s: float) -> None:
@@ -173,9 +186,32 @@ class Perception:
                               (p[1] - self._prev_pos[k][1]) / dt)
         self._prev_pos, self._prev_ts = pos, now
 
-        # 特效 → 事件起表
+        # P2#4: 敌人本帧不可见 → 保留最后已知位置, 置信度 exp(-age/τ) 衰减
+        if "enemy" in pos:
+            self._last_enemy_pos = pos["enemy"]
+            self._last_enemy_seen_ts = now
+        enemy_pos = pos.get("enemy", self._last_enemy_pos or (0.0, 0.0))
+        if self._last_enemy_pos is not None and self._last_enemy_seen_ts is not None:
+            age = max(0.0, now - self._last_enemy_seen_ts)
+            enemy_conf = float(math.exp(-age / ENEMY_POS_TAU_S))
+        else:
+            enemy_conf = 0.0
+
+        # 接近速度: 相对速度在视线方向上的投影, >0 = 接近中
+        sp = pos.get("self", (0.0, 0.0))
+        dx, dy = enemy_pos[0] - sp[0], enemy_pos[1] - sp[1]
+        dist = math.hypot(dx, dy)
+        if dist > 1e-3:
+            closing = ((vel["self"][0] - vel["enemy"][0]) * dx
+                       + (vel["self"][1] - vel["enemy"][1]) * dy) / dist
+        else:
+            closing = 0.0
+
+        # 特效 → 事件起表（打磨清单①: 计时器已在 __init__ 注册, 不再是 no-op）
         if any(d.cls == "effect_sub" for d in dets):
             self.trigger_event("enemy_sub")
+        if any(d.cls == "effect_ult" for d in dets):
+            self.trigger_event("enemy_ult")
 
         # 慢变量: 5帧一读（60Hz→12Hz）
         if frame.frame_id % self.slow_every == 0:
@@ -189,19 +225,28 @@ class Perception:
                         for b in ("skill1", "skill2", "skill3", "ult", "sub")},
             }
 
+        event_remaining = {k: t.remaining() for k, t in self._events.items()}
+        # 敌方替身就绪 = 计时器不在走（没见过特效或已走完 → 可骗/可用）
+        sub_ready_enemy = True
+        if "enemy_sub" in self._events:
+            sub_ready_enemy = not self._events["enemy_sub"].running
+
         res = PerceptionResult(
             frame_id=frame.frame_id,
             ts=now,
             self_pos=pos.get("self", (0.0, 0.0)),
-            enemy_pos=pos.get("enemy", (0.0, 0.0)),
+            enemy_pos=enemy_pos,
             self_vel=vel["self"],
             enemy_vel=vel["enemy"],
             enemy_visible="enemy" in pos,
+            enemy_pos_confidence=enemy_conf,
+            closing_speed=float(closing),
             hp_self=self._slow_cache.get("hp_self", 0.0),
             hp_enemy=self._slow_cache.get("hp_enemy", 0.0),
             energy_self=self._slow_cache.get("energy_self", 0.0),
             sub_ready_self=self._slow_cache.get("sub_ready_self", False),
+            sub_ready_enemy=sub_ready_enemy,
             cds=dict(self._slow_cache.get("cds", {})),
-            event_remaining={k: t.remaining() for k, t in self._events.items()},
+            event_remaining=event_remaining,
         )
         return res

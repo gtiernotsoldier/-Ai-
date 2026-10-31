@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from core.constants import (
-    DECISION_PERIOD_MS, DECISION_TIMEOUT_MS, LOOP_BUDGET_MS,
+    CHARGE_HOLD_MS, DECISION_PERIOD_MS, DECISION_TIMEOUT_MS, LOOP_BUDGET_MS,
     REDLINE_LATENCY_MS, STEER_EPS, TARGET_LATENCY_MS,
 )
 from core.executor import Executor, MacroHandle
@@ -118,7 +118,23 @@ class Orchestrator:
         self._btn_name: str | None = None
         self._stick_starts: int = 0        # 摇杆被(重新)按下次数, 写入 LoopReport
 
-    # ── 动作下发 ──
+    # ── 按钮反馈（打磨清单⑤: state.buttons 切片的真值来源）──
+    def _buttons_feedback(self, action: Action | None) -> dict | None:
+        """上一帧实际下发的动作 → buttons 反馈 dict（供 StateBuilder）。
+
+        策略层由此知道"我上一帧按了什么、摇杆在哪、蓄力蓄到哪"。
+        """
+        if action is None:
+            return None
+        return {
+            "joy_x": action.move[0], "joy_y": action.move[1],
+            "atk": action.button == "atk",
+            "skill": action.button in ("skill1", "skill2", "skill3", "ult"),
+            "dash": action.button == "dash",
+            "charged": (action.button is not None
+                        and action.hold_ms >= CHARGE_HOLD_MS),
+        }
+
     def _issue(self, action: Action) -> float:
         """走位与按钮分路下发。
 
@@ -157,6 +173,9 @@ class Orchestrator:
                 self._btn_handle = self.executor.play_async(
                     self.executor.tap_macro(action.button,
                                             hold_ms=action.hold_ms))
+                # 自己按了替身 → 自侧替身计时器起表（打磨清单①: 知道自己按过什么）
+                if action.button == "sub":
+                    self.perception.trigger_event("self_sub")
             self._btn_name = action.button
         return (time.perf_counter() - t0) * 1000.0
 
@@ -190,7 +209,8 @@ class Orchestrator:
                     res = self.perception.update(frame)
                     rpt.perceive_ms.append((time.perf_counter() - t0) * 1000)
                     t0 = time.perf_counter()
-                    state = self.builder.build(res, frame.frame_id, frame.ts)
+                    state = self.builder.build(res, frame.frame_id, frame.ts,
+                                               buttons=self._buttons_feedback(last_action))
                     rpt.state_ms.append((time.perf_counter() - t0) * 1000)
 
                     # ── 决策 + 看门狗: 超时沿用上帧动作 ──
