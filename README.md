@@ -18,6 +18,7 @@
 | M2 keymap 标定 | ✅ 完成 | config/keymap.json + tools/calibrate_keymap.py（--check/--frame 标注） |
 | M3 感知层 60Hz | ✅ 完成 | 快变量(可插拔YOLO/Mock) + 慢变量(纯OpenCV血条/能量/CD) + 事件计时器 → 64维状态向量 |
 | M4 宏引擎+minitouch | ✅ 完成 | injection(Minitouch/Mock) + macro(Tap/Swipe/Joystick 20Hz/贝塞尔) + executor(可中断宏协议+拟人化) |
+| M4.5 决策接口+主循环 | ✅ 完成 | policy(Action空间/Rule/Onnx/看门狗) + orchestrator(20Hz 闭环: 捕获→感知→状态→决策→执行, 沙箱自走) |
 | M5 录像+BC | ⬜ | CSPL 阶段① |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
@@ -28,6 +29,7 @@
 pip install -r requirements.txt          # 轻依赖: numpy/opencv/pytest
 python -m core.latency_test              # 验收: 感知闭环延迟（数字见下）
 python -m core.smoothness_test           # 验收: 丝滑度
+python -m core.orchestrator              # 演示: 20Hz 全链路自走 + 闭环延迟报告
 python -m tools.calibrate_keymap --check # M2 keymap 校验
 pytest -q                                # 单测
 ```
@@ -52,20 +54,34 @@ pip install av            # scrcpy 裸流解码
 M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms 的 23.1%，
 为决策前向(5-15ms)与模拟器物理税(32ms)留足余量。
 
+`python -m core.orchestrator`（20Hz 全链路自走 3s）:
+
+| 环节 | 预算 | p50 | p95 | max | 判定 |
+|---|---|---|---|---|---|
+| 画面捕获 | 10ms | 6.70 | 7.09 | 7.82 | PASS |
+| 感知推理 | 15ms | 0.03 | 0.26 | 0.33 | PASS |
+| 状态组装 | 1ms | 0.16 | 0.19 | 0.21 | PASS |
+| 决策(看门狗20ms) | 15ms | 0.01 | 0.01 | 0.02 | PASS |
+| 动作下发 | 1ms | 0.00 | 0.33 | 0.34 | PASS |
+| 闭环合计(捕获起) | 42ms | 6.99 | 7.41 | 8.06 | PASS |
+
+实测节拍 19.96Hz, 看门狗 0 触发, 残留触点 0 —— 闭环 p95 占红线 7.4%/目标 18.5%
+(不含模拟器渲染 16ms + 响应 16ms 物理税)。决策层换 OnnxPolicy 时同表重跑。
+
 `python -m core.smoothness_test`:
 - [A] 20Hz 节拍实测 19.97Hz, 周期抖动 p95=0.09ms → PASS
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 66 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
-M4 中断协议: 零残留 + Event.wait 即时唤醒）。
+`pytest -q`: 91 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾）。
 
 ## 目录结构
 
 ```
 core/          constants(宪法) | screen_capture(M1) | keymap+perception(M2/M3)
                state(64维) | detectors(可插拔) | injection+macro+executor(M4)
-               latency_test | smoothness_test
+               policy+orchestrator(M4.5) | latency_test | smoothness_test
 config/        keymap.json（标定产物）
 tools/         calibrate_keymap.py | synthetic.py
 tests/         pytest 单测

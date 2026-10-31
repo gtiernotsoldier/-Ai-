@@ -23,11 +23,19 @@ HUMANIZE_MISS_PX = 12.0       # 失误扰动最大像素偏移
 EXEC_INJECT_LIMIT_MS = 20.0   # 注入/中断响应上限（丝滑度[B]看门狗口径）
 GAP_TOLERANCE_X = 1.5         # 摇杆流相邻事件间隔容忍倍数 (50ms*1.5=75ms)
 
+# ───────────────────────── M4.5 决策接口 + 主循环 ─────────────────────────
+# 闭环本地可测子集预算: 捕获+感知+组装+决策+下发（模拟器渲染/响应两段物理税除外）
+LOOP_BUDGET_MS = 42.0
+# 离散动作表（OnnxPolicy argmax → 动作）: 0-8 摇杆8向+静止, 9-13 按钮
+ACTION_BUTTONS: tuple[str, ...] = ("skill1", "skill2", "skill3", "ult", "sub")
+
 # ───────────────────────── 频率规格 ─────────────────────────
 DECISION_HZ = 20              # 决策 20Hz
 FAST_HZ = 60                  # 感知快变量 60Hz
 SLOW_HZ = 12                  # 感知慢变量 12Hz（5帧一读）
 JOYSTICK_HZ = 20              # 摇杆 20Hz 连续流
+
+DECISION_PERIOD_MS = 1000.0 / DECISION_HZ     # 50ms 节拍
 
 # 感知慢变量降频比: FAST_HZ / SLOW_HZ
 SLOW_EVERY = FAST_HZ // SLOW_HZ   # = 5
