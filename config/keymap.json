@@ -1,0 +1,14 @@
+{
+  "frame": { "width": 1280, "height": 720, "source": "scrcpy 60FPS" },
+  "regions": {
+    "hp_self":     { "x": 40,  "y": 30,  "w": 300, "h": 18, "note": "己方血条(左上)" },
+    "hp_enemy":    { "x": 940, "y": 30,  "w": 300, "h": 18, "note": "敌方血条(右上)" },
+    "energy_self": { "x": 40,  "y": 650, "w": 300, "h": 10, "note": "己方能量条(左下)" },
+    "btn_skill1":  { "cx": 1050, "cy": 640, "r": 30, "note": "技能1" },
+    "btn_skill2":  { "cx": 1130, "cy": 640, "r": 30, "note": "技能2" },
+    "btn_skill3":  { "cx": 1210, "cy": 640, "r": 30, "note": "技能3" },
+    "btn_ult":     { "cx": 1150, "cy": 540, "r": 36, "note": "大招" },
+    "btn_sub":     { "cx": 980,  "cy": 540, "r": 30, "note": "替身" },
+    "joystick":    { "cx": 180,  "cy": 600, "r": 70, "note": "摇杆锚点(M4执行层用)" }
+  }
+}

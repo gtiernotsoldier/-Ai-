@@ -1,0 +1,9 @@
+numpy>=1.26
+opencv-python>=4.9
+pytest>=8.0
+
+# ── 可选重依赖（真机/真推理时再装, 代码已做优雅降级）──
+# ultralytics>=8.2     # YOLOv8n 快变量检测
+# onnxruntime>=1.17    # 决策层 ONNX FP16 前向
+# av>=12               # scrcpy H.264 裸流解码
+# pyzmq>=25            # 慢事后台进程通道 (M4+)
