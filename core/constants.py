@@ -43,9 +43,11 @@ CD_TOTAL_S: dict[str, float] = {
 }
 
 # 事件计时器时长（秒）【占位值, 需按角色实测标定】—— 打磨清单①:
-# 敌方替身/大招 HUD 不可见, 只能靠特效帧起表推算
+# 敌方替身/大招 HUD 不可见, 只能靠特效帧起表推算。
+# self_dash: 自己按下 dash 后起表（真机 dash 无 HUD 区域, 同①走推算路线）
 EVENT_CD_S: dict[str, float] = {
     "enemy_sub": 40.0, "self_sub": 40.0, "enemy_ult": 45.0,
+    "self_dash": 10.0,
 }
 
 # 敌人失踪后位置置信度衰减时间常数（秒）—— P2#4:
@@ -54,6 +56,23 @@ ENEMY_POS_TAU_S = 1.0
 
 # 威胁判定距离（px）: 敌方大招就绪且 dist<THREAT_RANGE_PX → relative.threat=1
 THREAT_RANGE_PX = 400.0
+
+# ───────────── ⑧ 检测器扩类: 威胁模型 / 墙体（施工⑧） ─────────────
+# 命中判定半径(px): 弹道与自身中心的最小 miss 距离, 小于此值才算「会打中」
+THREAT_HIT_RADIUS_PX = 45.0
+# 弹道最低速(px/s): 低于此值视为静止特效而非飞行道具, 不参与 TTC
+THREAT_MIN_SPEED_PX_S = 100.0
+# hitbox_warn(技能预警圈)的 TTC【占位值】: 预警框不带启动帧信息,
+# 用敌方典型出招前摇估计, 真机标定后可按敌方当前动作帧表推算
+HITBOX_WARN_TTC_S = 0.25
+# TTC 归一化上限(秒): threat_ttc_s / 此值 → [0,1] 进状态; 0.0=无威胁
+THREAT_TTC_NORM_S = 1.0
+
+# ── 墙体/场地边界 ──
+# YOLO 未检出 wall 类时的兜底场地: 画面四边内缩此像素当作边界
+WALL_FALLBACK_MARGIN_PX = 30.0
+# 墙距归一化(px): wall_dist / 此值 → [0,1], 1.0=远离墙
+WALL_DIST_NORM_PX = 500.0
 
 # ───────────────────────── 触点语义分配 ─────────────────────────
 # 摇杆与按钮必须分路: 抢同一路触点会互相顶掉（边走边放技能时按钮把杆松开）。

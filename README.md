@@ -20,7 +20,8 @@
 | M4 宏引擎+minitouch | ✅ 完成 | injection(Minitouch/Mock) + macro(Tap/Swipe/Joystick 20Hz/贝塞尔) + executor(可中断宏协议+拟人化) |
 | M4.5 决策接口+主循环 | ✅ 完成 | policy(Action空间/Rule/Onnx/看门狗) + orchestrator(20Hz 闭环: 捕获→感知→状态→决策→执行, 沙箱自走) |
 | 打磨 P0/P1/P2 | ✅ 完成 | P0-3 三键(atk/secret/dash) + P1 死维度回填(24→36)与张冠李戴修复 + P2 敌踪记忆/CD量纲; 见《打磨清单》 |
-| M4.6 帧数据表+Sequencer | ✅ 完成 | ⑥帧数据表+动作时序状态机 ⑦bait→sub_flash→punish 事件分支 ⑩20Hz策略/60Hz帧级分层(165 tests) |
+| M4.6 帧数据表+Sequencer | ✅ 完成 | ⑥帧数据表+动作时序状态机 ⑦bait→sub_flash→punish 事件分支 ⑩20Hz策略/60Hz帧级分层 |
+| M4.7 检测器扩类+博弈层 | ✅ 完成 | ⑧projectile/hitbox_warn/wall+威胁TTC+墙体 ⑨TradeScorer+IntentPolicy 决策梯(躲避/逃墙角/逼墙/bait-punish)(197 tests) |
 | M5 录像+BC | ⬜ | CSPL 阶段① |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
@@ -75,11 +76,12 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 165 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+`pytest -q`: 197 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
 M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾;
 **走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流;
 **打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环;
-**M4.6 Sequencer**: 连段一次下发不被逐tick重建/取消窗口替换/ bait→替身闪→punish 端到端, 见下表）。
+**M4.6 Sequencer**: 连段一次下发不被逐tick重建/取消窗口替换/ bait→替身闪→punish 端到端;
+**M4.7 博弈层**: 弹道 TTC(侧向脱靶不误报)/预警圈/墙距/flank/决策梯全梯级/Sequencer 接线, 见下表）。
 
 ### 打磨清单 P 级完成记录
 
@@ -94,7 +96,6 @@ closing_speed/approach/threat 语义修复、resources 敌我双侧、meta r6-r9
 | P2#5 | resources.ult_cd_self(秒/60) 与 skill_cds.ult(按总CD) 量纲分离 | ✅ |
 | ① | 事件计时器生产路径注册(enemy_sub/self_sub/enemy_ult)+特效起表+敌方替身就绪接回状态 | ✅ |
 | ⑤ | buttons 切片 6 维由上一帧实际下发动作回填（Orchestrator._buttons_feedback） | ✅ |
-| 未做 | 检测器扩类(projectile/wall, 施工⑧)、trade scorer(⑨) | ⬜ 等指令 |
 
 ### M4.6 帧数据表 + Sequencer（施工⑥⑦⑩）
 
@@ -108,8 +109,32 @@ closing_speed/approach/threat 语义修复、resources 敌我双侧、meta r6-r9
 直接转 Sequencer.on_events → 帧级切 punish(不经 20Hz 回合); 端到端测试验证 | ✅ |
 | 策略层接口 | 策略可选实现 bind_sequencer()(意图式), 未实现则按钮意图照旧单步下发(完全兼容) | ✅ |
 
-【占位值提醒】`CD_TOTAL_S` / `EVENT_CD_S` / `CHARGE_HOLD_MS` / `frame_data.json` 全部帧数
-与 btn_atk/btn_secret/btn_dash 坐标均为占位, 需真机实测标定后覆盖（标定前勿作训练标签依据）。
+### M4.7 检测器扩类 + 博弈策略层（施工⑧⑨）
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| ⑧检测器扩类 | YOLO 类别表扩至 13: projectile/hitbox_warn/wall + 6 个自身状态特效类;
+Detection 携带 facing; MockFastDetector 同构产出（合成 Scene 新增 Projectile/HitboxWarn/walls/facing_enemy 真值） | ✅ |
+| ⑧威胁模型 | `core/threat.py` ThreatTracker: 弹道跨帧关联 → 最近逼近法算 TTC(含脱靶判定,
+侧向飞过不误报); hitbox_warn 圈内即威胁; WallModel: 墙框优先/边界兜底的墙距+最近墙点 | ✅ |
+| ⑧状态回填 | threat_ttc/threat_dir(meta 10/11)、wall_dist_self/enemy(2/3)、effects 8 维全回填、
+flank(绕后)、engage(敌逼近)、敌方朝向、dash_cd(按过 dash 起表); meta r6-r11 语义化改名 | ✅ |
+| ⑨TradeScorer | 换血评分: 期望伤害−被反打风险(敌替身就绪×1.6/大招威胁×2.0)+血量优势项,
+规则化可解释; DAMAGE_EST 占位待标定 | ✅ |
+| ⑨IntentPolicy | 博弈决策梯: 被控停手→威胁侧移+强制dash→残血替身→逃墙角→逼墙压制(替身不在
+直接 punish)→bait(带 enemy_sub 事件分支)→trade 进攻→拉开/接近; 只读 64 维状态,
+bind_sequencer 提交序列意图, 未绑定退化单帧 Action | ✅ |
+| 执行反馈 | state.meta.action_progress(当前招式帧进度, Sequencer.progress)+watchdog 进状态;
+自己按 dash → self_dash 计时器(dash_cd 来源) | ✅ |
+
+【占位值提醒】`CD_TOTAL_S` / `EVENT_CD_S` / `CHARGE_HOLD_MS` / `HITBOX_WARN_TTC_S` /
+`DAMAGE_EST` / `frame_data.json` 全部帧数与 btn_atk/btn_secret/btn_dash 坐标均为占位,
+需真机实测标定后覆盖（标定前勿作训练标签依据）。
+
+【状态向量契约 v2】meta 切片 r6-r11 已语义化改名(enemy_sub_s/self_sub_s/enemy_ult_s/
+enemy_pos_conf/threat_ttc/threat_dir), slow_age/fast_age→wall_dist_self/enemy,
+decision_gauge→action_progress —— 决策/训练接口以 `StateLayout.describe()` 为准
+(尚无 onnx 导出, 训练前以此版定稿)。
 
 ### 走位下发机制（摇杆持久流）
 
@@ -135,8 +160,9 @@ closing_speed/approach/threat 语义修复、resources 敌我双侧、meta r6-r9
 ```
 core/          constants(宪法) | screen_capture(M1) | keymap+perception(M2/M3)
                state(64维) | detectors(可插拔) | injection+macro+executor(M4)
-               policy+orchestrator(M4.5) | latency_test | smoothness_test
-config/        keymap.json（标定产物, 含 atk/secret/dash 占位区域）
+               policy+orchestrator(M4.5) | frame_data+action_state+sequencer(M4.6)
+               threat+strategy(M4.7) | latency_test | smoothness_test
+config/        keymap.json（标定产物, 含 atk/secret/dash 占位区域） | frame_data.json
 tools/         calibrate_keymap.py | synthetic.py
 tests/         pytest 单测
 ```

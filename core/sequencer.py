@@ -196,6 +196,17 @@ class Sequencer:
     def current_name(self) -> str | None:
         return self._seq.name if self._seq is not None else None
 
+    def progress(self) -> float:
+        """当前在飞招式的帧进度 0~1(IDLE=0)。
+
+        进 state.meta.action_progress —— 策略层由此知道"这套招打到哪了",
+        是"取消后摇接新招"还是"等它打完"的判断依据。
+        """
+        q = self.tracker.query(self._clock.now())
+        if q.button is None:
+            return 0.0
+        return min(1.0, q.frame / self.fd.move(q.button).total)
+
     # ── 收尾 ──
     def shutdown(self) -> None:
         """打断在飞序列(中断协议: 只释放自己的触点, 零残留)。"""

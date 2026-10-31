@@ -17,6 +17,7 @@ import numpy as np
 from core.constants import (
     STATE_DIM, FRAME_W, FRAME_H,
     CD_TOTAL_S, EVENT_CD_S, THREAT_RANGE_PX,
+    THREAT_TTC_NORM_S,
 )
 from core.perception import PerceptionResult
 
@@ -42,9 +43,9 @@ class StateLayout:
         Slice("buttons", 38, 44, ("joy_x", "joy_y", "atk", "skill", "dash", "charged")),
         Slice("effects", 44, 52, ("hit_flash", "sub_flash_enemy", "sub_flash_self",
                                   "ult_cast", "i_frame", "knockdown", "cc", "super_armor")),
-        Slice("meta", 52, 64, ("frame_id", "t", "slow_age", "fast_age",
-                               "decision_gauge", "watchdog", "r6", "r7",
-                               "r8", "r9", "r10", "r11")),
+        Slice("meta", 52, 64, ("frame_id", "t", "wall_dist_self", "wall_dist_enemy",
+                               "action_progress", "watchdog", "enemy_sub_s", "self_sub_s",
+                               "enemy_ult_s", "enemy_pos_conf", "threat_ttc", "threat_dir")),
     )
 
     def __init__(self):
@@ -75,6 +76,12 @@ class StateBuilder:
     def build(self, r: PerceptionResult,
               frame_id: int = 0, now: float = 0.0,
               buttons: Optional[dict] = None) -> np.ndarray:
+        """buttons: 上一帧执行反馈 dict（Orchestrator 构造）。
+
+        除 buttons 切片的 6 键外还接受:
+          action_progress  当前在飞招式的帧进度(0~1, 来自 ActionTracker)
+          watchdog         上帧决策看门狗是否超时(0/1)
+        """
         v = np.zeros(STATE_DIM, dtype=np.float32)
         fb = buttons or {}
 
@@ -85,18 +92,29 @@ class StateBuilder:
         _2pi = 2 * math.pi
         sx, sy = r.self_pos
         ex, ey = r.enemy_pos
-        # self_kin（朝向信息由上层速度向量推算时占位 0.5）
+        # self_kin（朝向: 运动时用速度方向估计; 静止/未知 → 0.5）
         put("self_kin", 0, sx / FRAME_W); put("self_kin", 1, sy / FRAME_H)
         put("self_kin", 2, 0.5 + r.self_vel[0] / 2000); put("self_kin", 3, 0.5 + r.self_vel[1] / 2000)
+        spd = math.hypot(*r.self_vel)
+        put("self_kin", 4, (math.atan2(r.self_vel[1], r.self_vel[0]) + math.pi) / _2pi
+            if spd > 1.0 else 0.5)
         put("self_kin", 5, 1.0)
         put("self_kin", 6, 1.0 if abs(r.self_vel[0]) + abs(r.self_vel[1]) > 1 else 0.0)
+        # ⑧ dash_cd: 自己按 dash 起表的事件计时器（真机无 dash HUD 区域, 同①推算）
+        put("self_kin", 7, r.event_remaining.get("self_dash", 0.0)
+            / EVENT_CD_S["self_dash"])
         # enemy_kin
         put("enemy_kin", 0, ex / FRAME_W); put("enemy_kin", 1, ey / FRAME_H)
         put("enemy_kin", 2, 0.5 + r.enemy_vel[0] / 2000); put("enemy_kin", 3, 0.5 + r.enemy_vel[1] / 2000)
+        # ⑧ 敌方朝向(绕后/flank 感知来源); 未知 → 0.5
+        put("enemy_kin", 4, (r.facing_enemy + math.pi) / _2pi
+            if r.facing_enemy is not None else 0.5)
         put("enemy_kin", 5, 1.0 if r.enemy_visible else 0.0)
         # 修复打磨清单 P1「张冠李戴」: 敌方替身就绪必须填敌方侧,
         # 旧代码填的是 sub_ready_self → 策略会以为对手随时能替身
         put("enemy_kin", 6, 1.0 if r.sub_ready_enemy else 0.0)
+        # ⑧ engage: 敌方正在向我逼近
+        put("enemy_kin", 7, 1.0 if r.enemy_closing > 50.0 else 0.0)
         # relative
         dist = math.hypot(ex - sx, ey - sy)
         angle = (math.atan2(ey - sy, ex - sx) + math.pi) / _2pi
@@ -108,13 +126,16 @@ class StateBuilder:
         put("relative", 3, 0.5 + (r.energy_self - r.energy_enemy) / 2)
         # ④ 语义错位修复: approach=是否在接近, closing_speed=接近速度(px/s → 0.5±)
         put("relative", 4, 1.0 if r.closing_speed > 50.0 else 0.0)
-        # flank(绕后)需敌方朝向, 检测器扩类(施工顺序第8步)前保持 0 —— 诚实未知
+        # ⑧ flank(绕后): 自己在敌方背后扇区 —— 背后 = (自-敌)与敌方朝向反向
+        if r.facing_enemy is not None and dist > 1e-3:
+            ahead = (math.cos(r.facing_enemy) * (sx - ex)
+                     + math.sin(r.facing_enemy) * (sy - ey)) / dist
+            put("relative", 5, 1.0 if ahead < 0.0 else 0.0)
         put("relative", 6, 0.5 + r.closing_speed / 2000.0)
         # ④ 语义错位修复: threat=敌方大招就绪且近身, 不再是"对方残血"
         enemy_ult_ready = r.event_remaining.get("enemy_ult", 0.0) <= 0.01
         put("relative", 7, 1.0 if (r.enemy_visible and enemy_ult_ready
                                    and dist < THREAT_RANGE_PX) else 0.0)
-        # resources
         put("resources", 0, r.hp_self); put("resources", 1, r.hp_enemy)
         put("resources", 2, r.energy_self)
         put("resources", 3, r.energy_enemy)          # HUD 不可见, 恒0, 公式先就位
@@ -135,11 +156,21 @@ class StateBuilder:
         put("buttons", 3, 1.0 if fb.get("skill") else 0.0)
         put("buttons", 4, 1.0 if fb.get("dash") else 0.0)
         put("buttons", 5, 1.0 if fb.get("charged") else 0.0)
-        # effects 8 维: hit_flash/i_frame 等需检测器扩类(施工顺序第8步), 暂恒0
+        # effects 8 维（⑧ 检测器扩类后由感知层真实回填;
+        # PerceptionResult.effects 的键名与切片字段名一一对齐）
+        for i, name in enumerate(("hit_flash", "sub_flash_enemy", "sub_flash_self",
+                                  "ult_cast", "i_frame", "knockdown", "cc", "super_armor")):
+            put("effects", i, 1.0 if name in r.effects else 0.0)
         # meta
         put("meta", 0, (frame_id % 1000) / 1000.0)
         put("meta", 1, now / 3600.0)
-        # meta 空位回填（打磨清单①）: 事件计时器剩余归一化 + 敌方位置置信度
+        # ⑧ 墙距(归一化): 逼墙走位/被墙角判定/躲避选向的空间参照
+        put("meta", 2, r.wall_dist_self)
+        put("meta", 3, r.wall_dist_enemy)
+        # 执行反馈: 当前在飞招式的帧进度 + 上帧看门狗是否超时
+        put("meta", 4, fb.get("action_progress", 0.0))
+        put("meta", 5, 1.0 if fb.get("watchdog") else 0.0)
+        # 事件计时器剩余归一化 + 敌方位置置信度（打磨清单①）
         put("meta", 6, r.event_remaining.get("enemy_sub", 0.0)
             / EVENT_CD_S["enemy_sub"])
         put("meta", 7, r.event_remaining.get("self_sub", 0.0)
@@ -147,5 +178,11 @@ class StateBuilder:
         put("meta", 8, r.event_remaining.get("enemy_ult", 0.0)
             / EVENT_CD_S["enemy_ult"])
         put("meta", 9, r.enemy_pos_confidence)
+        # ⑧ 最紧迫威胁: TTC(0=无威胁) + 来向角((θ+π)/2π, 无威胁恒 0)
+        put("meta", 10, min(1.0, r.threat_ttc_s / THREAT_TTC_NORM_S)
+            if r.threat_active else 0.0)
+        if r.threat_active:
+            put("meta", 11, (math.atan2(r.threat_dir[1], r.threat_dir[0])
+                             + math.pi) / _2pi)
 
         return v

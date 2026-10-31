@@ -18,10 +18,13 @@ from typing import Callable
 
 import numpy as np
 
-from core.constants import ENEMY_POS_TAU_S, EVENT_CD_S
+from core.constants import (
+    ENEMY_POS_TAU_S, EVENT_CD_S, WALL_DIST_NORM_PX,
+)
 from core.detectors import Detection, FastDetector
 from core.keymap import Keymap
 from core.screen_capture import Frame
+from core.threat import ThreatTracker, WallModel
 
 
 # ═════════════════════════ 事件计时器 ═════════════════════════
@@ -120,6 +123,21 @@ class PerceptionResult:
     enemy_visible: bool = False
     enemy_pos_confidence: float = 0.0     # P2#4: 失踪后 exp(-age/τ) 衰减
     closing_speed: float = 0.0            # px/s, >0 = 双方接近中
+    enemy_closing: float = 0.0            # ⑧ px/s, >0 = 敌方在向我逼近(engage)
+    facing_self: float | None = None      # ⑧ 弧度; 未知为 None
+    facing_enemy: float | None = None     # ⑧ 弧度; 绕后/flank 判定的感知来源
+    # ⑧ 威胁模型: 最紧迫威胁(projectile 弹道 / hitbox_warn 预警)
+    threat_active: bool = False
+    threat_kind: str = ""                 # "projectile" | "hitbox_warn"
+    threat_ttc_s: float = 0.0             # 预计碰撞剩余秒; 0=无威胁
+    threat_dir: tuple[float, float] = (0.0, 0.0)   # 威胁来向(飞行方向)单位向量
+    # ⑧ 墙体: 归一化距离([0,1], 1=远离) + 最近墙点(px, 躲避选向/逼墙用)
+    wall_dist_self: float = 1.0
+    wall_dist_enemy: float = 1.0
+    self_wall_point: tuple[float, float] | None = None
+    enemy_wall_point: tuple[float, float] | None = None
+    # ⑧ 自身状态特效(hit_flash/i_frame/knockdown/cc/super_armor/sub_flash_self)
+    effects: frozenset = frozenset()
     # 慢变量（缓存, 12Hz 刷新）
     hp_self: float = 0.0
     hp_enemy: float = 0.0
@@ -152,6 +170,9 @@ class Perception:
         self._prev_ts: float | None = None
         self._slow_cache: dict = {}
         self._events: dict[str, EventTimer] = {}
+        # ⑧: 威胁模型(弹道追踪+TTC) 与 墙体模型
+        self.threats = ThreatTracker()
+        self.walls = WallModel()
         # 打磨清单①: 生产路径注册事件计时器（此前 register_event 从未被调用,
         # trigger_event 静默 no-op, event_remaining 永远空 dict）。
         # 敌方替身/大招 HUD 不可见 → 只能靠特效帧起表推算。
@@ -176,9 +197,12 @@ class Perception:
         # 快变量: 每帧
         dets = self.fast.detect(frame)
         pos: dict[str, tuple[float, float]] = {}
+        facing: dict[str, float] = {}
         for d in dets:
             if d.cls in ("self", "enemy"):
                 pos[d.cls] = (d.x + d.w / 2, d.y + d.h / 2)
+                if d.facing is not None:
+                    facing[d.cls] = d.facing
         vel: dict[str, tuple[float, float]] = {"self": (0.0, 0.0), "enemy": (0.0, 0.0)}
         if self._prev_ts is not None and now > self._prev_ts:
             dt = now - self._prev_ts
@@ -208,6 +232,29 @@ class Perception:
                        + (vel["self"][1] - vel["enemy"][1]) * dy) / dist
         else:
             closing = 0.0
+        # ⑧ 敌方单独的逼近速度(engage): 敌速在「敌→我」方向上的投影
+        if dist > 1e-3:
+            enemy_closing = ((vel["enemy"][0] * -dx + vel["enemy"][1] * -dy)
+                             / dist)
+        else:
+            enemy_closing = 0.0
+
+        # ⑧ 威胁模型: 弹道追踪/TTC + 预警圈; 墙模型: 墙距/最近墙点
+        sp_known = pos.get("self", self._prev_pos.get("self", (0.0, 0.0)))
+        threat = self.threats.update(dets, sp_known, now)
+        self.walls.update(dets)
+        s_pt, s_wd = self.walls.nearest_wall_point(sp_known)
+        e_pt, e_wd = self.walls.nearest_wall_point(enemy_pos)
+
+        # ⑧ 自身状态特效 → flags（YOLO 同名 effect_* 类/合成的同构检测）
+        effects = frozenset(
+            d.cls[len("effect_"):] for d in dets
+            if d.cls.startswith("effect_") and d.cls not in ("effect_sub", "effect_ult"))
+        # 敌我替身闪/大招施放的当帧可见标志（切片字段名对齐; 事件起表另行处理）
+        if any(d.cls == "effect_sub" for d in dets):
+            effects |= {"sub_flash_enemy"}
+        if any(d.cls == "effect_ult" for d in dets):
+            effects |= {"ult_cast"}
 
         # 特效 → 事件起表（打磨清单①: 计时器已在 __init__ 注册, 不再是 no-op）
         # 同时记录边沿(fired only on rising edge of this frame) → 主循环转交
@@ -248,6 +295,18 @@ class Perception:
             enemy_visible="enemy" in pos,
             enemy_pos_confidence=enemy_conf,
             closing_speed=float(closing),
+            enemy_closing=float(enemy_closing),
+            facing_self=facing.get("self"),
+            facing_enemy=facing.get("enemy"),
+            threat_active=threat.active,
+            threat_kind=threat.kind,
+            threat_ttc_s=threat.ttc_s if threat.active else 0.0,
+            threat_dir=(threat.dir_x, threat.dir_y) if threat.active else (0.0, 0.0),
+            wall_dist_self=min(1.0, s_wd / WALL_DIST_NORM_PX),
+            wall_dist_enemy=min(1.0, e_wd / WALL_DIST_NORM_PX),
+            self_wall_point=s_pt,
+            enemy_wall_point=e_pt,
+            effects=effects,
             hp_self=self._slow_cache.get("hp_self", 0.0),
             hp_enemy=self._slow_cache.get("hp_enemy", 0.0),
             energy_self=self._slow_cache.get("energy_self", 0.0),

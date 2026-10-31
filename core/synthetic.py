@@ -27,6 +27,23 @@ _CD_OVERLAY = (64, 32, 16)        # CD 剩余扇形遮罩(深藏青)
 _SUB_RING = (0, 255, 255)         # 替身就绪黄环
 _SELF_BLUE = (255, 160, 60)       # 己方角色
 _ENEMY_RED = (60, 60, 230)        # 敌方角色
+_PROJ_CYAN = (255, 255, 0)        # ⑧ 飞行道具
+_WARN_RED = (0, 0, 220)           # ⑧ 技能预警圈
+_WALL_GRAY = (110, 80, 50)        # ⑧ 场地墙体
+
+
+@dataclass(frozen=True)
+class Projectile:
+    """⑧ 飞行道具真值: 位置 + 速度(px/s)。Mock 检测器逐帧读它, 真机由 YOLO 逐帧框出。"""
+    pos: tuple[float, float]
+    vel: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class HitboxWarn:
+    """⑧ 技能预警圈真值: 圆心 + 半径（范围提示, 判定尚未生效）。"""
+    pos: tuple[float, float]
+    radius: float
 
 
 @dataclass
@@ -37,6 +54,7 @@ class Scene:
     self_vel: tuple[float, float] = (0.0, 0.0)
     enemy_vel: tuple[float, float] = (0.0, 0.0)
     facing_self: float = 0.0            # 弧度
+    facing_enemy: float = math.pi       # ⑧ 敌方朝向(弧度); 默认朝左（面向己方）
     hp_self: float = 1.0                # [0,1]
     hp_enemy: float = 1.0
     energy_self: float = 0.5
@@ -48,6 +66,10 @@ class Scene:
         "ult": 0.0, "sub": 0.0,
     })
     effects: set = field(default_factory=set)   # "hit_flash" 等
+    # ⑧ 检测器扩类: 场上动态实体真值
+    projectiles: tuple = field(default_factory=tuple)     # tuple[Projectile, ...]
+    hitbox_warns: tuple = field(default_factory=tuple)    # tuple[HitboxWarn, ...]
+    walls: tuple = field(default_factory=tuple)           # tuple[(x,y,w,h), ...] 场地墙段
 
 
 def draw_pie(img, cx: int, cy: int, r: int, fraction: float, color) -> None:
@@ -89,6 +111,19 @@ def render(scene: Scene, width: int = FRAME_W, height: int = FRAME_H) -> np.ndar
     if scene.sub_ready_self:
         cv2.circle(img, (980, 540), 30, _SUB_RING, 3, lineType=cv2.LINE_AA)
 
+    # ── ⑧ 场地墙体（YOLO wall 类的合成对齐物）──
+    for (wx, wy, ww, wh) in scene.walls:
+        cv2.rectangle(img, (int(wx), int(wy)), (int(wx + ww), int(wy + wh)),
+                      _WALL_GRAY, -1)
+
+    # ── ⑧ 技能预警圈 / 飞行道具 ──
+    for hb in scene.hitbox_warns:
+        cv2.circle(img, (int(hb.pos[0]), int(hb.pos[1])), int(hb.radius),
+                   _WARN_RED, 3, lineType=cv2.LINE_AA)
+    for pj in scene.projectiles:
+        cv2.circle(img, (int(pj.pos[0]), int(pj.pos[1])), 8,
+                   _PROJ_CYAN, -1, lineType=cv2.LINE_AA)
+
     # ── 角色 ──
     sx, sy = int(scene.self_pos[0]), int(scene.self_pos[1])
     ex, ey = int(scene.enemy_pos[0]), int(scene.enemy_pos[1])
@@ -97,5 +132,9 @@ def render(scene: Scene, width: int = FRAME_W, height: int = FRAME_H) -> np.ndar
     fy = int(30 * math.sin(scene.facing_self))
     cv2.arrowedLine(img, (sx, sy), (sx + fx, sy + fy), (255, 255, 255), 3)
     cv2.circle(img, (ex, ey), 30, _ENEMY_RED, -1, lineType=cv2.LINE_AA)
+    # ⑧ 敌方朝向箭头（绕后 flank 判定的感知来源）
+    efx = int(30 * math.cos(scene.facing_enemy))
+    efy = int(30 * math.sin(scene.facing_enemy))
+    cv2.arrowedLine(img, (ex, ey), (ex + efx, ey + efy), (0, 0, 0), 3)
 
     return img

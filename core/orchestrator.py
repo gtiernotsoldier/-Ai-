@@ -37,6 +37,7 @@ from core.policy import Action, PolicyProvider
 from core.screen_capture import FrameSource, SyntheticSource
 from core.sequencer import Sequencer, Sequence, Step
 from core.state import StateBuilder
+from core.strategy import IntentPolicy
 from core.synthetic import Scene
 
 
@@ -125,6 +126,7 @@ class Orchestrator:
         self._btn_handle: MacroHandle | None = None
         self._btn_name: str | None = None
         self._stick_starts: int = 0        # 摇杆被(重新)按下次数, 写入 LoopReport
+        self._last_watchdog: bool = False  # 上帧决策看门狗是否超时 → state.meta.watchdog
         # M4.6: 策略层若声明 bind_sequencer(意图式策略), 把执行层交给它 ——
         # 策略可 submit 连段/bait 序列, 而不只单帧按钮（清单第五节分层）
         if sequencer is not None and hasattr(policy, "bind_sequencer"):
@@ -134,7 +136,8 @@ class Orchestrator:
     def _buttons_feedback(self, action: Action | None) -> dict | None:
         """上一帧实际下发的动作 → buttons 反馈 dict（供 StateBuilder）。
 
-        策略层由此知道"我上一帧按了什么、摇杆在哪、蓄力蓄到哪"。
+        策略层由此知道"我上一帧按了什么、摇杆在哪、蓄力蓄到哪",
+        外加 action_progress(当前在飞招式帧进度)与 watchdog(上帧前向是否超时)。
         """
         if action is None:
             return None
@@ -145,7 +148,15 @@ class Orchestrator:
             "dash": action.button == "dash",
             "charged": (action.button is not None
                         and action.hold_ms >= CHARGE_HOLD_MS),
+            "action_progress": self._action_progress(),
+            "watchdog": self._last_watchdog,
         }
+
+    def _action_progress(self) -> float:
+        """当前在飞招式的帧进度 0~1（来自 Sequencer 的 ActionTracker）。"""
+        if self.sequencer is None:
+            return 0.0
+        return self.sequencer.progress()
 
     def _issue(self, action: Action) -> float:
         """走位与按钮分路下发。
@@ -182,8 +193,13 @@ class Orchestrator:
                 ok = self.sequencer.submit(
                     Sequence("tick", (Step(action.button,
                                            hold_ms=action.hold_ms),)))
-                if ok and action.button == "sub":
-                    self.perception.trigger_event("self_sub")
+                if ok:
+                    # 自己按了替身/闪避 → 自侧事件计时器起表（打磨清单①⑧:
+                    # 真机这两者无 HUD 区域, 只能按过什么起什么表）
+                    if action.button == "sub":
+                        self.perception.trigger_event("self_sub")
+                    elif action.button == "dash":
+                        self.perception.trigger_event("self_dash")
             else:
                 in_flight = (self._btn_handle is not None
                              and not self._btn_handle.done)
@@ -197,6 +213,8 @@ class Orchestrator:
                     # 自己按了替身 → 自侧替身计时器起表（打磨清单①: 知道自己按过什么）
                     if action.button == "sub":
                         self.perception.trigger_event("self_sub")
+                    elif action.button == "dash":
+                        self.perception.trigger_event("self_dash")
                 self._btn_name = action.button
         return (time.perf_counter() - t0) * 1000.0
 
@@ -211,6 +229,7 @@ class Orchestrator:
         t_start = self.clock.now()
         t_deadline = (t_start + duration_s) if duration_s else None
         last_action: Action | None = None
+        last_watchdog = False
         n = 0
         try:
             with self.source:
@@ -243,9 +262,11 @@ class Orchestrator:
                     action = self.policy.decide(state)
                     decide_ms = (time.perf_counter() - t0) * 1000
                     rpt.decide_ms.append(decide_ms)
-                    if decide_ms > DECISION_TIMEOUT_MS:
+                    watchdog_hit = decide_ms > DECISION_TIMEOUT_MS
+                    if watchdog_hit:
                         rpt.watchdog_hits += 1
                         action = last_action if last_action is not None else action
+                    self._last_watchdog = watchdog_hit
 
                     # ── 下发 ──
                     rpt.issue_ms.append(self._issue(action))
@@ -290,7 +311,7 @@ class Orchestrator:
 # ═════════════════════════ 沙箱自走演示 ═════════════════════════
 def main(duration_s: float = 3.0) -> int:
     print("=" * 78)
-    print("Shinobi_God 闭环演示 (M1-M4.6 全链路: 捕获→感知→状态→决策→Sequencer→执行)")
+    print("Shinobi_God 闭环演示 (M1-M4.7 全链路: 捕获→感知→状态→博弈决策→Sequencer→执行)")
     print("=" * 78)
     src = SyntheticSource(fps=60, scene=Scene())
     from core.detectors import MockFastDetector
@@ -298,8 +319,8 @@ def main(duration_s: float = 3.0) -> int:
     from core.perception import CVReader
     perc = Perception(MockFastDetector(), CVReader(Keymap.load()), slow_every=5)
     builder = StateBuilder()
-    from core.policy import RulePolicy
-    policy = RulePolicy()
+    # ⑨ 博弈策略: 躲避/逃墙角/逼墙/bait-punish/trade 评估（RulePolicy 保留作基线）
+    policy = IntentPolicy(fd=FrameData.load())
     inj = MockInjector(clock=time.monotonic)
     executor = Executor(inj, Keymap.load(), humanize=True)
     seqr = Sequencer(executor, FrameData.load())
