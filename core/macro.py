@@ -24,6 +24,7 @@ from typing import Callable, Optional
 
 from core.constants import (
     FRAME_W, FRAME_H,
+    CONTACT_JOYSTICK,
     HUMANIZE_REACTION_MS, HUMANIZE_MISS_RATE, HUMANIZE_MISS_PX,
     JOYSTICK_HZ,
 )
@@ -194,6 +195,12 @@ def primitive_duration(p: Primitive) -> float:
 class Macro:
     name: str
     primitives: tuple[Primitive, ...]
+    # 拟人化分层（宪法「拟人化永远开启」的正确实现方式）:
+    #   True  = 反应型动作 —— 首次响应某个新事件, 首事件前加 120ms 反应延迟
+    #   False = 序列型动作 —— 已决定好的连段/续流内部事件, 按帧表定时精确触发
+    # 真人打连段也不是每一下都重新反应 120ms, 是肌肉记忆一次排好的。
+    # 注意: 只有「反应延迟」受此开关控制; 1% 指令级失误扰动始终开启。
+    humanize: bool = True
 
     def __post_init__(self) -> None:
         if not self.primitives:
@@ -241,9 +248,14 @@ class MacroEngine:
 
     def _build_schedule(self, macro: Macro,
                         t0: float) -> tuple[list[tuple[float, TouchEvent, int]], float]:
-        """展开全部原语 → (绝对时刻排程, 总时长)。含拟人化反应延迟与失误扰动。"""
+        """展开全部原语 → (绝对时刻排程, 总时长)。含拟人化反应延迟与失误扰动。
+
+        反应延迟只在 macro.humanize=True（反应型动作）时施加。
+        序列型宏（连段内部/续流）必须零延迟 —— 否则 120ms > 50ms 节拍,
+        每个宏都会在发出首个事件前就被下一 tick 打断（见 JoystickStream 文档）。
+        """
         offset = 0.0
-        if self.humanize:
+        if self.humanize and macro.humanize:
             offset += HUMANIZE_REACTION_MS / 1000.0
         sched: list[tuple[float, TouchEvent, int]] = []
         # 拟人失误: 以 MISS_RATE 概率选一个原语整体偏移 ±MISS_PX
@@ -284,7 +296,149 @@ class MacroEngine:
                 res.interrupted = True
                 break
             res.inject_ms.append(self.injector.inject([ev]))
-        # 收尾: 中断 → 强制 reset 兜底（幂等, 保证零残留）; 正常路径按压已随 up 释放
-        if res.interrupted or self.injector.contacts_pressed():
-            res.release_ms = self.injector.reset()
+        # 收尾: 只释放**本宏自己的**触点, 绝不动其他路。
+        # 旧实现用全局 reset(), 会把摇杆持久流那一路(CONTACT_JOYSTICK)一起松掉
+        # → 分路之后每次按技能都会撕掉走位。全局 reset 只保留给 Executor.release_all()。
+        owned = {ev.contact for _due, ev, _pi in sched}
+        stuck = owned & self.injector.contacts_pressed()
+        if res.interrupted or stuck:
+            r_ms = 0.0
+            for c in sorted(stuck):
+                r_ms = max(r_ms, self.injector.release(c))
+            res.release_ms = r_ms        # 标记走过收尾路径（无触点可放时为 0.0）
         return res
+
+
+# ═════════════════════════ 摇杆持久流 ═════════════════════════
+class JoystickStream:
+    """长生命周期摇杆流 —— 按下一次, 之后按 JOYSTICK_HZ 持续发 move, 方向在线更新。
+
+    为什么必须有这个类（P0-1 修复）
+    ────────────────────────────────
+    20Hz 决策每 tick 都会给出**略有不同**的方向（对手一直在动）。旧实现每 tick
+    用浮点相等判"同向续流", 方向差一个尾数就中断并重建摇杆宏; 而重建的宏首事件前
+    有 HUMANIZE_REACTION_MS=120ms 反应延迟 > DECISION_PERIOD_MS=50ms
+    → 每个宏都在发出首个按下事件之前就被下一 tick 打断。
+
+    实测（MockInjector 记账真实触点, 2s / 40 tick）:
+
+        方向完全恒定      → 按下 5 次, move 20 次（每 320ms 断流 120ms, 占空比 62.5%）
+        方向每 tick 变 0.05° → 按下 **0** 次, move **0** 次（智能体完全不动）
+        方向每 tick 变 1.7°  → 按下 **0** 次, move **0** 次（智能体完全不动）
+
+    本类把「按下一次」与「持续转向」解耦:
+      - 按下只发生一次, 且保留 120ms 反应延迟（拟人化: 这属于反应型动作）
+      - 转向是零成本在线更新: 不释放触点、不重建宏、不加延迟
+      - 方向变化时允许提前下发（下限 STEER_MIN_INTERVAL_S）, 把最坏转向延迟
+        从 50ms 压到 20ms —— 走位躲技能靠的就是这 30ms
+      - 收尾用 injector.release(contact) 精确松手, 不影响按钮那一路触点
+    """
+
+    STEER_MIN_INTERVAL_S = 0.02      # 转向提前下发的最小间隔（限流 ≤50Hz）
+    RAMP_PERIODS = 3.0               # 推杆从 30% 平滑推到 100% 所需周期数
+
+    def __init__(self, engine: "MacroEngine", cx: float, cy: float, r: float,
+                 contact: int = CONTACT_JOYSTICK):
+        self.engine = engine
+        self.cx, self.cy, self.r = float(cx), float(cy), float(r)
+        self.contact = contact
+        self._lock = threading.Lock()
+        self._dir: tuple[float, float] = (0.0, 0.0)
+        self._strength: float = 1.0
+        self._stop = threading.Event()
+        self._wake = threading.Event()      # set_direction 转向 或 stop 都会唤醒
+        self._thread: threading.Thread | None = None
+        self._pressed = False               # 触点当前是否按下
+        self._press_t: float = 0.0
+        self.inject_ms: list[float] = []
+        self.n_events: int = 0
+        self.n_steers: int = 0              # 提前下发（非节拍点）的次数
+
+    # ── 方向在线更新（决策线程调用, 零释放零重建）──
+    def set_direction(self, dx: float, dy: float, strength: float = 1.0) -> None:
+        with self._lock:
+            self._dir = (float(dx), float(dy))
+            self._strength = float(min(max(strength, 0.0), 1.0))
+        self._wake.set()                    # 唤醒流线程立即评估是否提前下发
+
+    def _target(self, now: float) -> tuple[int, int]:
+        with self._lock:
+            dx, dy = self._dir
+            s = self._strength
+        n = math.hypot(dx, dy)
+        if n < 1e-6:
+            ox = oy = 0.0                   # 回中: 停走但手指仍握杆
+        else:
+            ox = dx / n * self.r * 0.9 * s
+            oy = dy / n * self.r * 0.9 * s
+        ramp = min(1.0, (now - self._press_t) / (self.RAMP_PERIODS * JOYSTICK_PERIOD_S)) \
+            if self._press_t else 1.0
+        f = 0.3 + 0.7 * ramp
+        return (int(round(self.cx + ox * f)), int(round(self.cy + oy * f)))
+
+    @property
+    def alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def pressed(self) -> bool:
+        return self._pressed
+
+    def start(self) -> None:
+        """启动流线程。幂等: 已存活则直接返回。"""
+        if self.alive:
+            return
+        self._stop.clear()
+        self._wake.clear()
+        self._thread = threading.Thread(target=self._run,
+                                        name="joystick-stream", daemon=True)
+        self._thread.start()
+
+    def _emit(self, x: int, y: int, action: str) -> None:
+        self.inject_ms.append(
+            self.engine.injector.inject([TouchEvent(self.contact, x, y, action)]))
+        self.n_events += 1
+
+    def _run(self) -> None:
+        clock = self.engine.clock
+        # 首次按下属"反应型动作" → 保留拟人化反应延迟（宪法: 拟人化永远开启）
+        if self.engine.humanize:
+            if clock.wait(HUMANIZE_REACTION_MS / 1000.0, self._stop):
+                return
+        self._press_t = clock.now()
+        x, y = self._target(self._press_t)
+        self._emit(x, y, "d")
+        self._pressed = True
+        try:
+            last_emit = self._press_t
+            while not self._stop.is_set():
+                remain = JOYSTICK_PERIOD_S - (clock.now() - last_emit)
+                if remain > 0:
+                    self._wake.clear()
+                    clock.wait(remain, self._wake)      # 被转向或 stop 唤醒
+                if self._stop.is_set():
+                    break
+                now = clock.now()
+                early = (now - last_emit) < JOYSTICK_PERIOD_S * 0.9
+                if early and (now - last_emit) < self.STEER_MIN_INTERVAL_S:
+                    continue                            # 限流: 距上次下发太近
+                nx, ny = self._target(now)
+                if early and (nx, ny) == (x, y):
+                    continue                            # 方向没变, 不必提前下发
+                if early:
+                    self.n_steers += 1
+                self._emit(nx, ny, "m")
+                x, y = nx, ny
+                last_emit = now
+        finally:
+            # 精确松手: 只释放摇杆这一路, 按钮触点(CONTACT_BUTTON)不受影响
+            if self._pressed:
+                self.engine.injector.release(self.contact)
+                self._pressed = False
+
+    def stop(self, timeout: float = 0.1) -> None:
+        """停流并释放触点。幂等。"""
+        self._stop.set()
+        self._wake.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)

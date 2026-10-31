@@ -13,13 +13,14 @@ import time
 from typing import Callable, Optional
 
 from core.constants import (
+    CONTACT_BUTTON, CONTACT_JOYSTICK,
     EXEC_INJECT_LIMIT_MS, GAP_TOLERANCE_X, JOYSTICK_HZ,
 )
 from core.injection import MockInjector, TouchInjector
 from core.keymap import Keymap
 from core.macro import (
     Macro, MacroEngine, MacroResult, MonotonicClock, VirtualClock,
-    Joystick, Swipe, Tap,
+    Joystick, JoystickStream, Swipe, Tap,
 )
 
 JOYSTICK_PERIOD_MS = 1000.0 / JOYSTICK_HZ
@@ -62,18 +63,28 @@ class Executor:
 
     # ── 宏拼装（语义 → 原语） ──
     def tap_macro(self, button: str, hold_ms: float = 40.0) -> Macro:
+        """按钮宏 —— 走 CONTACT_BUTTON, 与摇杆持久流分路（边走边放技能不互顶）。"""
         cx, cy, _r = self.km.circle(f"btn_{button}")
-        return Macro(f"tap_{button}", (Tap(cx, cy, hold_ms=hold_ms),))
+        return Macro(f"tap_{button}",
+                     (Tap(cx, cy, contact=CONTACT_BUTTON, hold_ms=hold_ms),))
 
     def joystick_macro(self, dx: float, dy: float, duration_ms: float,
                        strength: float = 1.0) -> Macro:
         cx, cy, r = self.km.circle("joystick")
-        return Macro("joystick", (Joystick(cx, cy, r, dx, dy,
-                                           duration_ms, strength=strength),))
+        return Macro("joystick", (Joystick(cx, cy, r, dx, dy, duration_ms,
+                                           strength=strength,
+                                           contact=CONTACT_JOYSTICK),))
+
+    def joystick_stream(self) -> JoystickStream:
+        """摇杆持久流 —— 主循环走位专用（转向不释放触点, 见 JoystickStream 文档）。"""
+        cx, cy, r = self.km.circle("joystick")
+        return JoystickStream(self.engine, cx, cy, r, contact=CONTACT_JOYSTICK)
 
     def swipe_macro(self, sx: float, sy: float, ex: float, ey: float,
                     duration_ms: float) -> Macro:
-        return Macro("swipe", (Swipe(sx, sy, ex, ey, duration_ms),))
+        # 一次性手势, 与按钮同路; 不占摇杆路（摇杆路由持久流长期持有）
+        return Macro("swipe", (Swipe(sx, sy, ex, ey, duration_ms,
+                                     contact=CONTACT_BUTTON),))
 
     def combo_macro(self, primitives: tuple, name: str = "combo") -> Macro:
         return Macro(name, tuple(primitives))

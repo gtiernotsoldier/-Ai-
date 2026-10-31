@@ -63,6 +63,25 @@ class TouchInjector(ABC):
     @abstractmethod
     def inject(self, events: list[TouchEvent]) -> float: ...
 
+    def release(self, contact: int) -> float:
+        """释放**单个**触点, 不影响其他触点。
+
+        与 reset() 的区别: reset 是"全清"（中断协议兜底）, release 是"精确松手"。
+        取消后摇/摇杆持久流收尾必须用 release —— 用 reset 会把正在推着的
+        摇杆一起松掉, 走位当场断流。
+
+        默认实现走 inject 单条 'u', 对 minitouch 协议即为 `u <contact>` + `c`。
+        """
+        return self.inject([TouchEvent(contact, 0, 0, "u")])
+
+    def contacts_pressed(self) -> set[int]:
+        """当前按下的触点集合。
+
+        宏引擎靠它决定"哪些触点需要收尾释放"。默认返回空集（表示无法追踪）,
+        具体注入器应自行跟踪 —— 不跟踪就不会做精确释放, 退化为依赖 reset 兜底。
+        """
+        return set()
+
     @abstractmethod
     def reset(self) -> float:
         """立即释放全部触点（minitouch 'r'）。中断协议的兜底手段。"""
@@ -117,6 +136,16 @@ class MockInjector(TouchInjector):
             self._pressed.clear()
         return (time.perf_counter() - t0) * 1000.0
 
+    def release(self, contact: int) -> float:
+        """精确释放单触点（记账 kind="release", 便于与 reset 区分统计）。"""
+        t0 = time.perf_counter()
+        with self._lock:
+            if contact in self._pressed:
+                self._log.append(InjectedEvent(
+                    TouchEvent(contact, 0, 0, "u"), self._clock(), kind="release"))
+                self._pressed.discard(contact)
+        return (time.perf_counter() - t0) * 1000.0
+
     # ── 观测接口（测试/验收用） ──
     @property
     def events(self) -> list[InjectedEvent]:
@@ -150,6 +179,7 @@ class MinitouchInjector(TouchInjector):
         self.timeout_s = timeout_s
         self._sock: socket.socket | None = None
         self.max_x, self.max_y = FRAME_W, FRAME_H   # banner 覆盖
+        self._pressed: set[int] = set()             # 触点跟踪（精确释放的依据）
 
     def _adb(self, *args: str) -> None:
         cmd = ["adb"] + (["-s", self.serial] if self.serial else []) + list(args)
@@ -212,16 +242,23 @@ class MinitouchInjector(TouchInjector):
             x, y = self._scale(ev)
             if ev.action == "u":
                 buf.append(f"u {ev.contact}\n")
+                self._pressed.discard(ev.contact)
             else:
                 buf.append(f"{ev.action} {ev.contact} {x} {y} {ev.pressure:g}\n")
+                if ev.action == "d":
+                    self._pressed.add(ev.contact)
         buf.append("c\n")
         self._sock.sendall("".join(buf).encode())
         return (time.perf_counter() - t0) * 1000.0
+
+    def contacts_pressed(self) -> set[int]:
+        return set(self._pressed)
 
     def reset(self) -> float:
         t0 = time.perf_counter()
         assert self._sock is not None, "MinitouchInjector 未 open()"
         self._sock.sendall(b"r\n")
+        self._pressed.clear()
         return (time.perf_counter() - t0) * 1000.0
 
     def close(self) -> None:

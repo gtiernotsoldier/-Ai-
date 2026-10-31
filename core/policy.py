@@ -26,14 +26,23 @@ from core.state import DEFAULT_LAYOUT, StateLayout
 # ═════════════════════════ 动作空间 ═════════════════════════
 @dataclass(frozen=True)
 class Action:
-    """单帧动作: 摇杆方向(单位向量, (0,0)=不动) + 可选按钮。
+    """单帧动作: 摇杆方向 + 可选按钮。二者可同时存在（边走边放技能）。
 
-    duration_ms 为摇杆流刷新窗口(≈4 决策周期): 同向动作由主循环自动延续,
-    方向变更靠 M4 中断协议即时切换(响应<20ms)。
+    move      方向单位向量, (0,0)=回中停走
+    strength  推杆幅度 [0,1]。满推=冲刺走位, 半推=慢速压场/微调。
+              方向决定"往哪走", strength 决定"走多急" —— 压场靠的是后者。
+    hold_ms   按钮按压时长。点按 ≈40ms; 长按/蓄力 ≥ CHARGE_HOLD_MS。
+              普攻的长按与点按在-game 是两套行为, 必须能表达。
+    duration_ms 摇杆流刷新窗口(≈4 决策周期), 保留字段供离散动作表使用。
+
+    走位由 JoystickStream 持久流承载: 同向/微变向都是在线更新, 不重建不释放;
+    只有按钮走一次性宏（独立触点）。
     """
     move: tuple[float, float] = (0.0, 0.0)
     button: str | None = None
     duration_ms: float = 200.0
+    hold_ms: float = 40.0
+    strength: float = 1.0
 
     def __post_init__(self) -> None:
         if self.button is not None and self.button not in ACTION_BUTTONS:
@@ -41,6 +50,10 @@ class Action:
         n = math.hypot(*self.move)
         if n > 1.0 + 1e-6:
             raise ValueError(f"move 需为单位向量或零向量, 模长={n}")
+        if not 0.0 <= self.strength <= 1.0:
+            raise ValueError(f"strength 需在 [0,1], 实为 {self.strength}")
+        if self.hold_ms < 0.0:
+            raise ValueError(f"hold_ms 不可为负, 实为 {self.hold_ms}")
 
 
 # 离散动作表: 0=静止, 1-8=八方向; 9-13=按钮（OnnxPolicy 输出 argmax → Action）

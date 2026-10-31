@@ -97,7 +97,9 @@ class CVReader:
         disk = np.zeros(roi.shape[:2], np.uint8)
         cv2.circle(disk, (r, r), r, 255, -1)
         mask = cv2.inRange(roi, self._SUB_LOWER, self._SUB_UPPER)
-        return np.count_nonzero(cv2.bitwise_and(mask, disk)) > 40
+        # 显式 bool(): 否则返回 np.bool_, numpy>=2.5 下 `is True` 判定会失败,
+        # 且 numpy 标量会顺着 PerceptionResult 渗进状态/决策层。
+        return bool(np.count_nonzero(cv2.bitwise_and(mask, disk)) > 40)
 
 
 # cv2 延迟绑定（保持模块可被无 GUI 环境导入）
