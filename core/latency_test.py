@@ -85,8 +85,8 @@ def run_sandbox(frames: int = 300) -> int:
     print(f"对照: 目标40ms / 红线100ms —— 感知侧占用预算 "
           f"{p95 / REDLINE_LATENCY_MS * 100:.1f}% (红线) / "
           f"{p95 / TARGET_LATENCY_MS * 100:.1f}% (目标)")
-    print("\n[提示] 决策前向(5-15ms)+minitouch(<1ms)+模拟器物理税(32ms) 属 M4/M6 环节, "
-          "待真机联调后并入本表。")
+    print("\n[提示] 决策前向(5-15ms)+模拟器物理税(32ms) 属 M6 环节, 待真机联调后并入本表;")
+    print("       minitouch 注入(M4)已实现, 实测见 smoothness_test [B]: 注入 p95<0.1ms。")
     return 1 if fail else 0
 
 

@@ -17,6 +17,11 @@ CLOSED_LOOP_FORBIDDEN = ("network", "disk_io", "sleep")
 # 拟人化输出（永远开启）
 HUMANIZE_REACTION_MS = 120    # 策略级反应延迟
 HUMANIZE_MISS_RATE = 0.01     # 指令级扰动/失误率
+HUMANIZE_MISS_PX = 12.0       # 失误扰动最大像素偏移
+
+# ───────────────────────── M4 执行层 ─────────────────────────
+EXEC_INJECT_LIMIT_MS = 20.0   # 注入/中断响应上限（丝滑度[B]看门狗口径）
+GAP_TOLERANCE_X = 1.5         # 摇杆流相邻事件间隔容忍倍数 (50ms*1.5=75ms)
 
 # ───────────────────────── 频率规格 ─────────────────────────
 DECISION_HZ = 20              # 决策 20Hz

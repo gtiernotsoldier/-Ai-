@@ -60,11 +60,9 @@ def check_cadence() -> tuple[bool, str]:
 
 
 def check_executor() -> tuple[bool, str]:
-    """[B] 摇杆/注入/中断 —— 需要 M4 执行层。"""
-    if not (Path(__file__).resolve().parent.parent / "core" / "executor.py").exists():
-        return True, ("[SKIP] 摇杆轨迹平滑/注入<20ms/中断零残留: 依赖执行层(M4), "
-                      "未实现。M4 落地后本测试自动启用。")
-    return True, "[TODO] M4 executor 存在, 接入具体检查项"
+    """[B] 摇杆/注入/中断 —— 委托 M4 执行层（core/executor.py）。"""
+    from core.executor import check_executor as _check
+    return _check()
 
 
 def main() -> int:
