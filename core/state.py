@@ -26,6 +26,10 @@ from core.constants import (
 )
 from core.perception import PerceptionResult
 
+# 状态契约版本。每次改动 SLICES 的维度含义都必须 +1 ——
+# 录制的 episode 会带上这个号, 版本不符时缓存数据判废而不是静默错算。
+LAYOUT_VERSION = 3
+
 # 相对位置满量程: dx=±FRAME_W 映射到 [0,1]（0.5=重合）。
 # x/y 必须用同一尺度, 否则角度会被压扁 —— 这正是绝对坐标(x/1280,y/720)的老毛病。
 REL_POS_FULL_PX = float(FRAME_W)
@@ -70,6 +74,19 @@ class StateLayout:
 
     def describe(self) -> dict[str, tuple[str, ...]]:
         return {f"{s.name}[{s.start}:{s.end}]": s.fields for s in self.SLICES}
+
+    def index(self, slice_name: str, field: str) -> int:
+        """取某一维在 64 向量里的绝对下标。
+
+        `index("resources", "hp_enemy") -> 25`。所有下游模块（奖励、关键帧、
+        数据体检）都走这里，不再出现写死的 24/25 —— 布局一改，全部自动跟随。
+        """
+        for s in self.SLICES:
+            if s.name == slice_name:
+                if field not in s.fields:
+                    raise KeyError(f"{slice_name} 没有字段 {field!r}: {s.fields}")
+                return s.start + s.fields.index(field)
+        raise KeyError(f"没有切片 {slice_name!r}: {[s.name for s in self.SLICES]}")
 
 
 DEFAULT_LAYOUT = StateLayout()

@@ -23,7 +23,9 @@
 | M4.6 帧数据表+Sequencer | ✅ 完成 | ⑥帧数据表+动作时序状态机 ⑦bait→sub_flash→punish 事件分支 ⑩20Hz策略/60Hz帧级分层 |
 | M4.7 检测器扩类+博弈层 | ✅ 完成 | ⑧projectile/hitbox_warn/wall+威胁TTC+墙体 ⑨TradeScorer+IntentPolicy 决策梯(躲避/逃墙角/逼墙/bait-punish)(197 tests) |
 | M4.8 对齐 Shūkai | ✅ 完成 | 动作四头+mask / 状态契约 v3 相对坐标 / HumanProfile 三档难度 / HP差×7 奖励 / ActionChunk (247 tests) |
-| M5 录像+BC | ⬜ | CSPL 阶段① |
+| M4.9 离线数据契约 | ✅ 完成 | `core/episode.py`: 唯一时基 ts / valid 掩码 / 全帧存储+降权采样 / 时间加权折扣 / 元数据随行 / 时基校验 |
+| M4.10 关键决策点 | ✅ 完成 | `core/keyframe.py`: 六路信号（hp/回报落差/起手/收招/威胁/翻转）+ 时间维 NMS + 跨局聚合 + 无事发生量化 (313 tests) |
+| M5 录像+BC | ⬜ | CSPL 阶段①（契约已就绪, 缺采集器与训练脚本） |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
 
@@ -77,7 +79,7 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 247 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+`pytest -q`: 313 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
 M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾;
 **走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流;
 **打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环;
@@ -150,7 +152,6 @@ decision_gauge→action_progress —— 决策/训练接口以 `StateLayout.desc
 | 分块 | `ActionChunk` K 步意图 → 一次编译一次下发（连段/时长档位量化） | `core/policy.py` |
 
 **契约 v3 要点**（训练侧必须按此导出 onnx）：
-
 ```
 self_kin.wall_dx/dy  最近墙点相对自机位移 /WALL_DIST_NORM_PX, 0.5=贴墙
 enemy_kin.dx/dy      敌方相对自机位移 /(2*REL_POS_FULL_PX), 0.5=重合
@@ -183,6 +184,79 @@ tracker = HpReward(personality=CAUTIOUS)   # 或 BALANCED / AGGRESSIVE
 r = tracker.update(state, terminal=done)   # 血量差, 终局 ×7
 ```
 
+### M4.9 离线数据契约（`core/episode.py`）
+
+采集器、数据集、训练脚本三边共用的**唯一**数据结构。定错了，录多少废多少。
+
+```python
+ep = Episode(EpisodeMeta.from_env("ep_0007", device="MuMu"))
+ep.append(ts, frame_id, state, valid, action4, hold_idx, reward)
+ep.finish("win")
+ep.save("episodes/ep_0007.npz")     # 3200 帧 ≈ 37KB（压缩后 ~12B/帧）
+
+ep = Episode.load("episodes/ep_0007.npz")
+ep.summary()          # frames / valid_ratio / change_points / frame_drop_rate
+ep.validate()         # [] = 可进训练集
+```
+
+四条设计规则，每条对应一个已踩或必然踩到的坑：
+
+| 规则 | 原因 |
+|---|---|
+| **`ts` 是唯一时基** | 掉帧后索引整体错位，`window()` 按 `ts` 筛而非按「往前数 k 条」 |
+| **`valid` 显式记录** | 感知失败时状态不可信；沿用旧值 = 教模型忽略失败，填零 = 看到幻觉 |
+| **存全帧，降权在训练侧做** | 只留变化点 → 模型学成「每次决策都要换动作」，上线疯狂抖动 |
+| **折扣按 Δt 加权** | `G_t = r_t + γ^Δt·G_{t+1}`，按帧数累加会让 γ 失去物理意义 |
+
+**时基校验**（`validate()` 里）：n 帧应覆盖 n/fps 秒，偏差 >50% 直接判废。
+这条能抓住「录制没走节拍器」——那种数据的时长和折扣全是假的，而且不报错。
+
+元数据强制随行：`layout_version`（契约版本）/ `keymap_hash`（标定指纹）/ `git_sha`。
+三者缺一，半年后无法判断这批数据还能不能用。`load_dir()` 会自动跳过版本或体检
+不过的文件并打印原因，不静默吞掉坏数据。
+
+### M4.10 关键决策点提取（`core/keyframe.py`）
+
+一局 3200 帧里真正改变走向的通常只有 1%~5%，其余是**重复操作**（摇杆没动、
+血量没变、威胁没变）。本模块把「哪些帧值得学」和「在这些帧上怎么做更好」拆开：
+
+- **前者是规则** —— 可计算的冲击力度量，不需要任何训练
+- **后者才需要摸索** —— RL / DAgger 只在这些点上花力气，搜索空间降一个数量级
+
+```python
+from core.keyframe import extract, extract_many
+
+rep = extract(ep)          # 单局
+rep.summary()              # frames / keyframes / ratio / eventless_ratio / by_kind
+rep.top(10)                # 最强 10 个，每条带「为什么」
+rep.states()               # (K,64) —— 直接当 start-state curriculum 的重开状态
+
+agg = extract_many(eps, per_episode_cap=20)   # 跨局聚合，事件带 episode_id
+```
+
+六路信号，全部从 `episode` 数组算出，零额外采集：
+
+| 信号 | 物理含义 | 默认权重 |
+|---|---|---|
+| `hp_swing` | 血量跳变 | 6.0 × 血量差 |
+| `payoff` | 回报落差 \|ΔG\|（终局 MC 回报的事后视角） | 1.2 × 归一化落差 |
+| `engage` | idle → 非 idle（起手） | 2.0 |
+| `disengage` | 非 idle → idle（收招） | 1.2 |
+| `threat` | 威胁从无到有 | 1.5 |
+| `flip` | 敌方可见性翻转 / 距离跨越交战带（130 / 420px） | 1.5 / 0.8 |
+
+三条必须踩准的实现细节：
+
+| 细节 | 踩错会怎样 |
+|---|---|
+| **ΔG 左移一格** | `G` 是「剩余总回报」，`G_t − G_{t−1}` 度量的是 **t−1 那一步**。不移的话每个关键点都晚 50ms，DAgger 接管时差一格 = 教错 |
+| **payoff 用绝对尺度** | 用本局分位数归一，一局几乎无伤时会把 0.02 的掉血放大成满格信号，满屏都是「关键点」 |
+| **NMS 按时间不用按索引** | 一次 2 秒连段会吐出二十个点；按 `ts` 抑制，`min_gap_s=0.4` 只留最强那一帧 |
+
+「无事发生」是可量化的（`eventless_ratio`）：动作没变 + 无血量变化 + 距离变化
+< 6px + 无威胁。合成战斗数据上实测 **93.8%** 的帧落在这一类——这个比例越高，
+按帧平均的训练/人审预算浪费得越多。
+
 ### 走位下发机制（摇杆持久流）
 
 走位与按钮**分路下发**，这是 P0-1 修复后的形态：
@@ -209,7 +283,7 @@ core/          constants(宪法) | screen_capture(M1) | keymap+perception(M2/M3)
                state(64维/v3相对) | detectors(可插拔) | injection+macro+executor(M4)
                policy(四头)+orchestrator(M4.5) | frame_data+action_state+sequencer(M4.6)
                threat+strategy(M4.7) | human_profile+reward(M4.8)
-               latency_test | smoothness_test
+               episode(离线数据契约, M4.9) | keyframe(关键决策点, M4.10)\n               latency_test | smoothness_test
 config/        keymap.json（标定产物, 含 atk/secret/dash 占位区域） | frame_data.json
 tools/         calibrate_keymap.py | synthetic.py
 tests/         pytest 单测
