@@ -22,6 +22,7 @@
 | 打磨 P0/P1/P2 | ✅ 完成 | P0-3 三键(atk/secret/dash) + P1 死维度回填(24→36)与张冠李戴修复 + P2 敌踪记忆/CD量纲; 见《打磨清单》 |
 | M4.6 帧数据表+Sequencer | ✅ 完成 | ⑥帧数据表+动作时序状态机 ⑦bait→sub_flash→punish 事件分支 ⑩20Hz策略/60Hz帧级分层 |
 | M4.7 检测器扩类+博弈层 | ✅ 完成 | ⑧projectile/hitbox_warn/wall+威胁TTC+墙体 ⑨TradeScorer+IntentPolicy 决策梯(躲避/逃墙角/逼墙/bait-punish)(197 tests) |
+| M4.8 对齐 Shūkai | ✅ 完成 | 动作四头+mask / 状态契约 v3 相对坐标 / HumanProfile 三档难度 / HP差×7 奖励 / ActionChunk (247 tests) |
 | M5 录像+BC | ⬜ | CSPL 阶段① |
 | M6 PPO 自对弈 | ⬜ | CSPL 阶段③ |
 | M7 蒸馏合并 | ⬜ | CSPL 阶段② |
@@ -76,7 +77,7 @@ M1-M3 子链路合计 p95=9.22ms —— 占红线 100ms 的 9.2%、目标 40ms �
 - [B] 摇杆流 22 事件/秒, 间隔 p95=50.01ms max=50.01ms (容忍 75ms) → PASS；
   注入 p95=0.018ms (<20ms) → PASS；中断响应 0.20ms, 残留触点 0 → PASS
 
-`pytest -q`: 197 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
+`pytest -q`: 247 passed（含 CV 读数精度对账: 血条 ±0.03 / CD ±0.014 / 能量 ±0.04;
 M4 中断协议: 零残留 + Event.wait 即时唤醒; M4.5 看门狗沿用上帧 + 零残留收尾;
 **走位持久流回归**: 对手持续移动时每 tick 方向都在变, 摇杆仍只按下 1 次且 20Hz 不断流;
 **打磨 P 级回归**: 三键执行/张冠李戴/敌踪衰减/CD量纲/buttons 反馈闭环;
@@ -136,6 +137,52 @@ enemy_pos_conf/threat_ttc/threat_dir), slow_age/fast_age→wall_dist_self/enemy,
 decision_gauge→action_progress —— 决策/训练接口以 `StateLayout.describe()` 为准
 (尚无 onnx 导出, 训练前以此版定稿)。
 
+### M4.8 对齐 Shūkai（Naruto Mobile, arXiv:2406.01103）
+
+同款游戏的线上 DRL 智能体给出的四条工程结论，本版全部落地（均不需要训练）：
+
+| 项 | 改造 | 文件 |
+|---|---|---|
+| 动作空间 | 单头 17 选 1 → **四头** `move_ud×move_lr×skill×direction` + `ActionMask`（CD/能量/替身/被控屏蔽） | `core/policy.py` |
+| 状态 | 契约 **v3**：绝对屏幕坐标 → 锚点相对（墙向量 + 敌方相对位移/速度），镜头平移后状态逐位不变 | `core/state.py` |
+| 难度 | `HumanProfile(delay_ms, exec_prob, miss_rate)` 三档，换档即换强度，同一套权重 | `core/human_profile.py` |
+| 奖励 | 血量差 + 终局 ×7，三种人格权重（均衡/谨慎/激进），不再手调 `DAMAGE_EST` | `core/reward.py` |
+| 分块 | `ActionChunk` K 步意图 → 一次编译一次下发（连段/时长档位量化） | `core/policy.py` |
+
+**契约 v3 要点**（训练侧必须按此导出 onnx）：
+
+```
+self_kin.wall_dx/dy  最近墙点相对自机位移 /WALL_DIST_NORM_PX, 0.5=贴墙
+enemy_kin.dx/dy      敌方相对自机位移 /(2*REL_POS_FULL_PX), 0.5=重合
+enemy_kin.rvx/rvy    相对速度 (敌-自)/2000
+```
+
+为什么改：旧版 `self_kin.x = sx/1280` 是屏幕绝对坐标，镜头一滚同一局面就变成
+不同输入（ORBiT, arXiv:2610.28197 的 failure mode）。绝对坐标已彻底移除，
+`tests/test_state.py::test_camera_shift_invariance` 守着这条不变量。
+
+**动作四头**解决的是旧动作表的死结：`action_from_index()` 让「移动」与「按钮」
+互斥，ONNX 策略永远表达不了「边走边放技能」。四头后 `ActionHeads(move_ud=0,
+move_lr=2, skill=6)` 同时给出右上前压 + 普攻；`ActionMask` 把 CD 没好/能量不够
+的动作直接屏蔽，省掉无效探索。
+
+**难度档**（Shūkai 的部署方式，对应 Elo 0-600 / 600-999 / 999-1299）：
+
+```python
+from core.human_profile import BEGINNER, INTERMEDIATE, ADVANCED
+Executor(inj, km, profile=BEGINNER)   # 220ms 反应 + 75% 执行率
+executor.set_profile(INTERMEDIATE)    # 热切换, 不换权重
+```
+默认 `profile=None` 时行为与旧版逐字节一致（120ms / 1%），不影响既有回归。
+
+**奖励**（M6 直接用，别再自创 shaping）：
+
+```python
+from core.reward import HpReward, CAUTIOUS
+tracker = HpReward(personality=CAUTIOUS)   # 或 BALANCED / AGGRESSIVE
+r = tracker.update(state, terminal=done)   # 血量差, 终局 ×7
+```
+
 ### 走位下发机制（摇杆持久流）
 
 走位与按钮**分路下发**，这是 P0-1 修复后的形态：
@@ -159,9 +206,10 @@ decision_gauge→action_progress —— 决策/训练接口以 `StateLayout.desc
 
 ```
 core/          constants(宪法) | screen_capture(M1) | keymap+perception(M2/M3)
-               state(64维) | detectors(可插拔) | injection+macro+executor(M4)
-               policy+orchestrator(M4.5) | frame_data+action_state+sequencer(M4.6)
-               threat+strategy(M4.7) | latency_test | smoothness_test
+               state(64维/v3相对) | detectors(可插拔) | injection+macro+executor(M4)
+               policy(四头)+orchestrator(M4.5) | frame_data+action_state+sequencer(M4.6)
+               threat+strategy(M4.7) | human_profile+reward(M4.8)
+               latency_test | smoothness_test
 config/        keymap.json（标定产物, 含 atk/secret/dash 占位区域） | frame_data.json
 tools/         calibrate_keymap.py | synthetic.py
 tests/         pytest 单测

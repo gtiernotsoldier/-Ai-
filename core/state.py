@@ -5,6 +5,11 @@
   - StateBuilder.build(...) -> np.float32(64,)
   - StateLayout.describe()   -> {维度区间: 说明}
 全部取值归一化到 [0,1]（角度除以 2π）。
+
+契约 v3（ORBiT, arXiv:2610.28197）—— 坐标全部锚点相对, 不再用屏幕绝对坐标:
+  self_kin.wall_dx/dy  最近墙点相对自机的位移(±WALL_DIST_NORM_PX), 0.5=贴墙
+  enemy_kin.dx/dy      敌方相对自机的位移(±REL_POS_FULL_PX), 0.5=重合
+  绝对位置被彻底移除: 镜头滚动/整屏平移后, 状态向量保持不变（有单测）。
 """
 from __future__ import annotations
 
@@ -17,9 +22,13 @@ import numpy as np
 from core.constants import (
     STATE_DIM, FRAME_W, FRAME_H,
     CD_TOTAL_S, EVENT_CD_S, THREAT_RANGE_PX,
-    THREAT_TTC_NORM_S,
+    THREAT_TTC_NORM_S, WALL_DIST_NORM_PX,
 )
 from core.perception import PerceptionResult
+
+# 相对位置满量程: dx=±FRAME_W 映射到 [0,1]（0.5=重合）。
+# x/y 必须用同一尺度, 否则角度会被压扁 —— 这正是绝对坐标(x/1280,y/720)的老毛病。
+REL_POS_FULL_PX = float(FRAME_W)
 
 
 @dataclass(frozen=True)
@@ -31,11 +40,16 @@ class Slice:
 
 
 class StateLayout:
-    """64 维布局定义。修改此表 = 修改决策/训练接口契约, 需同步 onnx 导出。"""
+    """64 维布局定义。修改此表 = 修改决策/训练接口契约, 需同步 onnx 导出。
+
+    v3 语义（锚点相对）:
+      self_kin  墙向量 / 自身速度 / 朝向 / 存活 / 移动 / dash_cd
+      enemy_kin 相对位移 / 相对速度 / 朝向 / 可见 / 替身就绪 / 逼近
+    """
 
     SLICES = (
-        Slice("self_kin", 0, 8, ("x", "y", "vx", "vy", "facing", "alive", "moving", "dash_cd")),
-        Slice("enemy_kin", 8, 16, ("x", "y", "vx", "vy", "facing", "visible", "sub_ready", "engage")),
+        Slice("self_kin", 0, 8, ("wall_dx", "wall_dy", "vx", "vy", "facing", "alive", "moving", "dash_cd")),
+        Slice("enemy_kin", 8, 16, ("dx", "dy", "rvx", "rvy", "facing", "visible", "sub_ready", "engage")),
         Slice("relative", 16, 24, ("dist", "angle", "hp_diff", "energy_diff", "approach", "flank", "closing_speed", "threat")),
         Slice("resources", 24, 32, ("hp_self", "hp_enemy", "energy_self", "energy_enemy",
                                     "sub_ready_self", "sub_ready_enemy", "ult_cd_self", "ult_cd_enemy")),
@@ -59,6 +73,21 @@ class StateLayout:
 
 
 DEFAULT_LAYOUT = StateLayout()
+
+
+def _wall_vector(wall_point: tuple[float, float] | None,
+                 sx: float, sy: float) -> tuple[float, float]:
+    """最近墙点相对自机的位移, 除以 WALL_DIST_NORM_PX → ±1（±500px）。
+
+    wall_point 缺失时按画面四边兜底（与 WallModel 的边界兜底同口径）,
+    保证任何 PerceptionResult 都能给出「墙在哪边」。
+    """
+    if wall_point is None:
+        cands = ((sx, (0.0, sy)), (FRAME_W - sx, (FRAME_W, sy)),
+                 (sy, (sx, 0.0)), (FRAME_H - sy, (sx, FRAME_H)))
+        wall_point = min(cands, key=lambda t: t[0])[1]
+    return ((wall_point[0] - sx) / WALL_DIST_NORM_PX,
+            (wall_point[1] - sy) / WALL_DIST_NORM_PX)
 
 
 class StateBuilder:
@@ -92,8 +121,10 @@ class StateBuilder:
         _2pi = 2 * math.pi
         sx, sy = r.self_pos
         ex, ey = r.enemy_pos
-        # self_kin（朝向: 运动时用速度方向估计; 静止/未知 → 0.5）
-        put("self_kin", 0, sx / FRAME_W); put("self_kin", 1, sy / FRAME_H)
+        # self_kin v3: 墙向量（最近墙点 - 自机位置）, 替代绝对屏幕坐标。
+        # 墙点缺失时按画面四边兜底 —— 与 WallModel 的边界兜底同口径。
+        wx, wy = _wall_vector(r.self_wall_point, sx, sy)
+        put("self_kin", 0, 0.5 + wx / 2); put("self_kin", 1, 0.5 + wy / 2)
         put("self_kin", 2, 0.5 + r.self_vel[0] / 2000); put("self_kin", 3, 0.5 + r.self_vel[1] / 2000)
         spd = math.hypot(*r.self_vel)
         put("self_kin", 4, (math.atan2(r.self_vel[1], r.self_vel[0]) + math.pi) / _2pi
@@ -103,9 +134,11 @@ class StateBuilder:
         # ⑧ dash_cd: 自己按 dash 起表的事件计时器（真机无 dash HUD 区域, 同①推算）
         put("self_kin", 7, r.event_remaining.get("self_dash", 0.0)
             / EVENT_CD_S["self_dash"])
-        # enemy_kin
-        put("enemy_kin", 0, ex / FRAME_W); put("enemy_kin", 1, ey / FRAME_H)
-        put("enemy_kin", 2, 0.5 + r.enemy_vel[0] / 2000); put("enemy_kin", 3, 0.5 + r.enemy_vel[1] / 2000)
+        # enemy_kin v3: 相对位移/相对速度（锚点=自机）。满量程 ±REL_POS_FULL_PX。
+        put("enemy_kin", 0, 0.5 + (ex - sx) / (2 * REL_POS_FULL_PX))
+        put("enemy_kin", 1, 0.5 + (ey - sy) / (2 * REL_POS_FULL_PX))
+        put("enemy_kin", 2, 0.5 + (r.enemy_vel[0] - r.self_vel[0]) / 2000)
+        put("enemy_kin", 3, 0.5 + (r.enemy_vel[1] - r.self_vel[1]) / 2000)
         # ⑧ 敌方朝向(绕后/flank 感知来源); 未知 → 0.5
         put("enemy_kin", 4, (r.facing_enemy + math.pi) / _2pi
             if r.facing_enemy is not None else 0.5)

@@ -78,10 +78,10 @@ class TestRulePolicy:
         put(st, "resources", "energy_self", 0.8)
         put(st, "resources", "ult_cd_self", 0.0)
         put(st, "enemy_kin", "visible", 1.0)
-        put(st, "enemy_kin", "x", 0.6)
-        put(st, "enemy_kin", "y", 0.5)
-        put(st, "self_kin", "x", 0.4)
-        put(st, "self_kin", "y", 0.5)
+        put(st, "enemy_kin", "dx", 0.6)
+        put(st, "enemy_kin", "dy", 0.5)
+        put(st, "self_kin", "wall_dx", 0.4)
+        put(st, "self_kin", "wall_dy", 0.5)
         put(st, "relative", "dist", 0.4)          # 600px: 不近身
         assert RulePolicy().decide(st).button == "ult"
 
@@ -90,8 +90,8 @@ class TestRulePolicy:
         put(st, "resources", "hp_self", 0.9)
         put(st, "resources", "energy_self", 0.2)
         put(st, "enemy_kin", "visible", 1.0)
-        put(st, "enemy_kin", "x", 0.6)
-        put(st, "self_kin", "x", 0.5)
+        put(st, "enemy_kin", "dx", 0.6)
+        put(st, "self_kin", "wall_dx", 0.5)
         put(st, "relative", "dist", 0.15)         # 225px < 300
         assert RulePolicy().decide(st).button == "skill1"
 
@@ -100,10 +100,10 @@ class TestRulePolicy:
         put(st, "resources", "hp_self", 0.9)
         put(st, "skill_cds", "skill1", 0.5)      # 绕过近身技能分支
         put(st, "enemy_kin", "visible", 1.0)
-        put(st, "enemy_kin", "x", 0.7)
-        put(st, "enemy_kin", "y", 0.3)
-        put(st, "self_kin", "x", 0.3)
-        put(st, "self_kin", "y", 0.5)
+        put(st, "enemy_kin", "dx", 0.7)
+        put(st, "enemy_kin", "dy", 0.3)
+        put(st, "self_kin", "wall_dx", 0.3)
+        put(st, "self_kin", "wall_dy", 0.5)
         put(st, "relative", "dist", 0.5)
         a = RulePolicy().decide(st)
         assert a.button is None
@@ -114,8 +114,9 @@ class TestRulePolicy:
         put(st, "resources", "hp_self", 0.9)
         put(st, "skill_cds", "skill1", 0.5)      # 绕过近身技能分支
         put(st, "enemy_kin", "visible", 1.0)
-        put(st, "enemy_kin", "x", 0.7)
-        put(st, "self_kin", "x", 0.5)
+        put(st, "enemy_kin", "dx", 0.7)
+        put(st, "enemy_kin", "dy", 0.5)          # v3: 0.5=无纵向偏移
+        put(st, "self_kin", "wall_dx", 0.5)
         put(st, "relative", "dist", 0.05)         # 75px < 120 近身圈
         assert RulePolicy().decide(st).move[0] < -0.5   # 反向拉开
 

@@ -16,6 +16,7 @@ from core.constants import (
     CONTACT_BUTTON, CONTACT_JOYSTICK,
     EXEC_INJECT_LIMIT_MS, GAP_TOLERANCE_X, JOYSTICK_HZ,
 )
+from core.human_profile import HumanProfile
 from core.injection import MockInjector, TouchInjector
 from core.keymap import Keymap
 from core.macro import (
@@ -55,11 +56,17 @@ class Executor:
 
     def __init__(self, injector: TouchInjector, keymap: Keymap,
                  clock: MonotonicClock | VirtualClock | None = None,
-                 rng_seed: int | None = 42, humanize: bool = True):
+                 rng_seed: int | None = 42, humanize: bool = True,
+                 profile: HumanProfile | None = None):
         self.km = keymap
         self.injector = injector
         self.engine = MacroEngine(injector, clock=clock,
-                                  rng_seed=rng_seed, humanize=humanize)
+                                  rng_seed=rng_seed, humanize=humanize,
+                                  profile=profile)
+
+    def set_profile(self, profile: HumanProfile | None) -> None:
+        """换难度档（同一套权重, 换档即换强度）—— Shūkai 的部署方式。"""
+        self.engine.set_profile(profile)
 
     # ── 宏拼装（语义 → 原语） ──
     def tap_macro(self, button: str, hold_ms: float = 40.0) -> Macro:

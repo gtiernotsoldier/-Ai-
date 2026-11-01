@@ -28,6 +28,7 @@ from core.constants import (
     HUMANIZE_REACTION_MS, HUMANIZE_MISS_RATE, HUMANIZE_MISS_PX,
     JOYSTICK_HZ,
 )
+from core.human_profile import HumanProfile
 from core.injection import TouchEvent, TouchInjector
 
 JOYSTICK_PERIOD_S = 1.0 / JOYSTICK_HZ          # 50ms
@@ -235,12 +236,31 @@ class MacroEngine:
     def __init__(self, injector: TouchInjector,
                  clock: MonotonicClock | VirtualClock | None = None,
                  rng_seed: int | None = 42,
-                 humanize: bool = True):
+                 humanize: bool = True,
+                 profile: HumanProfile | None = None):
         self.injector = injector
         self.clock = clock if clock is not None else MonotonicClock()
         import random
         self.rng = random.Random(rng_seed)
         self.humanize = humanize
+        # 难度档（Shūkai）: None = 历史默认（120ms / 1%），行为逐字节不变
+        self.profile = profile
+
+    @property
+    def reaction_ms(self) -> float:
+        return self.profile.delay_ms if self.profile is not None else HUMANIZE_REACTION_MS
+
+    @property
+    def miss_rate(self) -> float:
+        return self.profile.miss_rate if self.profile is not None else HUMANIZE_MISS_RATE
+
+    @property
+    def exec_prob(self) -> float:
+        return self.profile.exec_prob if self.profile is not None else 1.0
+
+    def set_profile(self, profile: HumanProfile | None) -> None:
+        """热切换难度档（同一套权重, 换档即换强度）。"""
+        self.profile = profile
 
     def _clamp(self, x: float, y: float) -> tuple[int, int]:
         return (int(min(max(round(x), 0), FRAME_W - 1)),
@@ -256,11 +276,16 @@ class MacroEngine:
         """
         offset = 0.0
         if self.humanize and macro.humanize:
-            offset += HUMANIZE_REACTION_MS / 1000.0
+            # Shūkai 的「动作执行概率」: 走神/手滑, 这条指令根本没发出去。
+            # 只在显式降档（exec_prob<1）时抽签 —— 默认档不消耗随机数,
+            # 保证历史宏排程逐字节不变（既有测试的种子序列不受影响）。
+            if self.exec_prob < 1.0 and self.rng.random() > self.exec_prob:
+                return [], 0.0
+            offset += self.reaction_ms / 1000.0
         sched: list[tuple[float, TouchEvent, int]] = []
-        # 拟人失误: 以 MISS_RATE 概率选一个原语整体偏移 ±MISS_PX
+        # 拟人失误: 以 miss_rate 概率选一个原语整体偏移 ±MISS_PX
         miss_idx = None
-        if self.humanize and self.rng.random() < HUMANIZE_MISS_RATE:
+        if self.humanize and self.rng.random() < self.miss_rate:
             miss_idx = self.rng.randrange(len(macro.primitives))
         for pi, prim in enumerate(macro.primitives):
             if isinstance(prim, Wait):
@@ -403,7 +428,7 @@ class JoystickStream:
         clock = self.engine.clock
         # 首次按下属"反应型动作" → 保留拟人化反应延迟（宪法: 拟人化永远开启）
         if self.engine.humanize:
-            if clock.wait(HUMANIZE_REACTION_MS / 1000.0, self._stop):
+            if clock.wait(self.engine.reaction_ms / 1000.0, self._stop):
                 return
         self._press_t = clock.now()
         x, y = self._target(self._press_t)

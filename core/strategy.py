@@ -37,6 +37,7 @@ import numpy as np
 from core.frame_data import FrameData
 from core.policy import Action, PolicyProvider, StateReader
 from core.sequencer import Sequence, Sequencer, Step, combo_sequence
+from core.state import REL_POS_FULL_PX
 
 
 # ═════════════════════════ ② 资源置换评估 ═════════════════════════
@@ -130,8 +131,22 @@ class IntentPolicy(PolicyProvider):
         return (dx / n, dy / n) if n > 1e-6 else (0.0, 0.0)
 
     def _toward_center(self, from_xy: tuple[float, float]) -> tuple[float, float]:
-        """指向屏幕中心的方向(归一化) —— 贴墙时它必然背离墙。"""
+        """指向屏幕中心的方向(归一化) —— 贴墙时它必然背离墙。
+
+        ⚠️ 契约 v3 起自机绝对坐标已不进状态, 本函数仅保留给历史调用;
+        新代码请用 _away_from_wall(state)。
+        """
         return self._norm(0.5 - from_xy[0], 0.5 - from_xy[1])
+
+    def _away_from_wall(self, state: np.ndarray) -> tuple[float, float]:
+        """远离最近墙的方向（v3: self_kin.wall_dx/dy 直接给出墙向量）。
+
+        贴墙时这是唯一正确的逃逸方向; 比旧的「朝屏幕中心」更准 ——
+        镜头滚动时屏幕中心并不等于场地中心, 而墙向量始终成立。
+        """
+        wx = (self.r(state, "self_kin", "wall_dx") - 0.5) * 2
+        wy = (self.r(state, "self_kin", "wall_dy") - 0.5) * 2
+        return self._norm(-wx, -wy)
 
     def _submit(self, name: str, steps: tuple[str, ...],
                 branches: tuple[tuple[str, str], ...] = (),
@@ -147,8 +162,9 @@ class IntentPolicy(PolicyProvider):
     # ── 主决策 ──
     def decide(self, state: np.ndarray) -> Action:
         r = self.r
-        sx = (r(state, "self_kin", "x"), r(state, "self_kin", "y"))
-        ex = (r(state, "enemy_kin", "x"), r(state, "enemy_kin", "y"))
+        # v3: 敌方位移直接相对自机（px）, 不再由两侧绝对坐标相减
+        erel = ((r(state, "enemy_kin", "dx") - 0.5) * 2 * REL_POS_FULL_PX,
+                (r(state, "enemy_kin", "dy") - 0.5) * 2 * REL_POS_FULL_PX)
         dist = r(state, "relative", "dist") * 1500.0
         enemy_visible = r(state, "enemy_kin", "visible") > 0.5
         hp_self = r(state, "resources", "hp_self")
@@ -172,7 +188,9 @@ class IntentPolicy(PolicyProvider):
             theta = threat_dir_norm * 2 * math.pi - math.pi    # 来向角
             tx, ty = math.cos(theta), math.sin(theta)
             p1, p2 = (-ty, tx), (ty, -tx)                      # 两个垂直向
-            c = self._toward_center(sx)
+            c = self._away_from_wall(state)
+            if c == (0.0, 0.0):
+                c = self._norm(-erel[0], -erel[1])             # 无墙信息 → 往敌反向
             perp = p1 if p1[0] * c[0] + p1[1] * c[1] >= p2[0] * c[0] + p2[1] * c[1] else p2
             if self._seqr is not None and dash_cd <= 0.05 \
                     and self._seqr.current_name != "dodge_dash":
@@ -186,10 +204,12 @@ class IntentPolicy(PolicyProvider):
         if hp_self < 0.30 and sub_ready:
             return Action(button="sub")
 
-        # 3) 被墙角 → 朝中心 dash 逃逸
+        # 3) 被墙角 → 背离最近墙 dash 逃逸
         if (wall_self < self.CORNER_WALL_NORM
                 and enemy_visible and dist < self.CORNER_ENEMY_PX):
-            esc = self._toward_center(sx)
+            esc = self._away_from_wall(state)
+            if esc == (0.0, 0.0):
+                esc = self._norm(-erel[0], -erel[1])
             if self._seqr is not None and dash_cd <= 0.05 \
                     and self._seqr.current_name != "escape_dash":
                 self._submit("escape_dash", ("dash",), force=True)
@@ -198,21 +218,19 @@ class IntentPolicy(PolicyProvider):
             return Action(move=esc)
 
         if not enemy_visible:
-            # 敌方失踪: 沿中心方向压场慢走(不空追, 等置信度恢复)
-            c = self._toward_center(sx)
+            # 敌方失踪: 背离墙角慢慢回到场地内侧(不空追, 等置信度恢复)
+            c = self._away_from_wall(state)
             return Action(move=c, strength=self.SLOW_WALK_STRENGTH) \
                 if c != (0.0, 0.0) else Action(move=(0.0, 0.0))
 
-        # 4) 逼墙压制: 敌贴墙 → 站到「敌心→中心」方向上卡位, 替身不在则上高伤
+        # 4) 逼墙压制: 敌贴墙 → 卡在「自机→敌」线上, 到 PIN_OFFSET 停住;
+        #    替身不在则上高伤 punish。
         enemy_cornered = wall_enemy < self.CORNER_WALL_NORM
         if enemy_cornered and dist < self.PRESSURE_RANGE_PX:
-            pin_dir = self._toward_center(ex)          # 敌心 → 中心
-            target = (ex[0] + pin_dir[0] * self.PIN_OFFSET_PX / 1280.0,
-                      ex[1] + pin_dir[1] * self.PIN_OFFSET_PX / 720.0)
-            mv = self._norm(target[0] - sx[0], target[1] - sx[1])
             if not enemy_sub_ready:
                 # 对面替身不在 CD: 打不跑, 直接高伤 punish
                 self._submit("punish_sub", ("skill2", "atk", "atk", "skill3"))
+            mv = self._norm(*erel) if dist > self.PIN_OFFSET_PX else (0.0, 0.0)
             return Action(move=mv, strength=self.SLOW_WALK_STRENGTH)
 
         # 5) bait/punish: 敌方替身就绪 → 低成本起手逼它交(事件分支见 Sequencer)
@@ -222,13 +240,13 @@ class IntentPolicy(PolicyProvider):
             if self._submit("bait_atk", ("atk", "atk"),
                             branches=(("enemy_sub", "punish_sub"),)):
                 self._last_bait = self._clock()
-            mv = self._norm(ex[0] - sx[0], ex[1] - sx[1])
+            mv = self._norm(*erel)
             return Action(move=mv, strength=self.SLOW_WALK_STRENGTH)
 
         # 5.5) 太近拉开: 敌在我方近身圈内且不在压墙/连段意图中 → 拉开身位
         #      (必须在进攻梯级之前, 否则被 dist<射程 永久遮蔽)
         if dist < self.RETREAT_RANGE_PX:
-            mv = self._norm(sx[0] - ex[0], sx[1] - ex[1])
+            mv = self._norm(-erel[0], -erel[1])
             return Action(move=mv)
 
         # 6) 常规进攻: trade score > 0 且在射程
@@ -243,10 +261,10 @@ class IntentPolicy(PolicyProvider):
                     and skill1_cd <= 0.01:
                 self._submit("engage_basic", steps)
             # 边打边微调贴住(连段期间摇杆继续由持久流承载)
-            mv = self._norm(ex[0] - sx[0], ex[1] - sx[1])
+            mv = self._norm(*erel)
             return Action(move=mv, strength=self.SLOW_WALK_STRENGTH)
 
         # 7) 默认走位: 中距接近 / 远距全速接近
-        mv = self._norm(ex[0] - sx[0], ex[1] - sx[1])
+        mv = self._norm(*erel)
         return Action(move=mv, strength=self.SLOW_WALK_STRENGTH) \
             if dist < self.PRESSURE_RANGE_PX else Action(move=mv)

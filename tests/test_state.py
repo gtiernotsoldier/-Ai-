@@ -39,15 +39,30 @@ def test_build_shape_dtype():
     assert np.all(v >= 0.0) and np.all(v <= 1.0), "全部取值须归一化 [0,1]"
 
 
-def test_position_encoding():
+def test_position_encoding_relative_v3():
+    """契约 v3: 位置全部锚点相对, 绝对屏幕坐标不进状态。"""
     r = PerceptionResult(frame_id=0, ts=0.0,
                          self_pos=(640, 360), enemy_pos=(320, 180))
     v = StateBuilder().build(r)
-    assert v[0] == 640 / 1280
-    assert v[1] == 360 / 720
-    assert v[8] == 320 / 1280
-    # relative.dist: hypot(320,180)=367 -> /1500
+    # 墙向量: 最近边界是上边(y=0) → dy=-360px, /500 → -0.72, 映射 0.5+v/2
+    assert v[0] == pytest_approx(0.5)                       # x 方向无墙
+    assert v[1] == pytest_approx(0.5 - 360 / 500 / 2)
+    # 敌方相对位移: dx=-320, dy=-180, 满量程 ±1280
+    assert v[8] == pytest_approx(0.5 - 320 / (2 * 1280))
+    assert v[9] == pytest_approx(0.5 - 180 / (2 * 1280))
+    # relative.dist 不变: hypot(320,180)=367 -> /1500
     assert v[16] == pytest_approx(math.hypot(320, 180) / 1500)
+
+
+def test_camera_shift_invariance():
+    """整屏平移(镜头滚动)后, 相对状态必须逐位不变 —— ORBiT 的验收条件。"""
+    b = StateBuilder()
+    r1 = PerceptionResult(frame_id=0, ts=0.0, self_pos=(640, 360),
+                          enemy_pos=(320, 180), self_wall_point=(640, 0))
+    r2 = PerceptionResult(frame_id=0, ts=0.0, self_pos=(740, 410),
+                          enemy_pos=(420, 230), self_wall_point=(740, 50))
+    v1, v2 = b.build(r1), b.build(r2)
+    assert np.allclose(v1, v2, atol=1e-6), "平移不变量被破坏: 绝对坐标回流"
 
 
 def pytest_approx(x, abs=1e-5):
